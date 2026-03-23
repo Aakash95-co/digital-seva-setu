@@ -1,201 +1,176 @@
-import dash
-from dash import dcc, html, dash_table, Input, Output, State
-from dash.dash_table.Format import Format
+import streamlit as st
 import pandas as pd
-from app import app
-from data import df
 
-layout = html.Div([
-    # Downloads (Metadata specific)
-    dcc.Download(id="download-services"),
-    dcc.Download(id="download-services-outoftime"),
-    dcc.Download(id="download-office-received"),
-    dcc.Download(id="download-office-outoftime"),
-    dcc.Download(id="download-district-received"),
-    dcc.Download(id="download-district-outoftime"),
 
-    html.Div([
-        html.H3("Metadata Summary"),
-        html.Div([
-            # Left Column
-            html.Div([
-                html.Div([
-                    html.H4("1) Total Services - Count & % (desc)", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-services", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-services",
-                    columns=[
-                        {"name": "Service", "id": "Service_Eng"},
-                        {"name": "Count", "id": "Count"},
-                        {"name": "Percent", "id": "Percent"},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-                html.Div([
-                    html.H4("3) Total Services by Office (Received)", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-office-received", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-services-by-office",
-                    columns=[
-                        {"name": "Office", "id": "Office_Eng"},
-                        {"name": "Received", "id": "Received"},
-                        {"name": "Percent", "id": "Percent", "type": "numeric", "format": Format(precision=2, scheme="f", symbol_suffix="%")},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-                html.Div([
-                    html.H4("5) Total Services by District (Received) - desc", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-district-received", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-services-by-district",
-                    columns=[
-                        {"name": "District", "id": "District_Eng"},
-                        {"name": "Received", "id": "Received"},
-                        {"name": "Percent", "id": "Percent", "type": "numeric", "format": Format(precision=2, scheme="f", symbol_suffix="%")},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-            ], style={"width": "48%", "display": "inline-block", "verticalAlign": "top"}),
+def render(df):
+    st.markdown(
+        """
+        <div style='background: linear-gradient(90deg, #1a3c5e 0%, #2d6a9f 100%);
+                    padding: 18px 28px; border-radius: 10px; margin-bottom: 20px;'>
+            <h2 style='color: white; margin: 0; font-size: 1.6rem; letter-spacing: 1px;'>
+                📋 Dataset Overview & Metadata
+            </h2>
+            <p style='color: #c8dff0; margin: 4px 0 0 0; font-size: 0.95rem;'>
+                Structural summary of the Digital Seva Setu dataset
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-            # Right Column
-            html.Div([
-                html.Div([
-                    html.H4("2) Total Services Out of Time - Count & % (desc)", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-services-outoftime", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-services-outoftime",
-                    columns=[
-                        {"name": "Service", "id": "Service_Eng"},
-                        {"name": "OutOfTime_Count", "id": "OutOfTime_Count"},
-                        {"name": "Percent", "id": "Percent", "type": "numeric", "format": Format(precision=2, scheme="f", symbol_suffix="%")},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-                html.Div([
-                    html.H4("4) Total Out of Time by Office", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-office-outoftime", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-outoftime-by-office",
-                    columns=[
-                        {"name": "Office", "id": "Office_Eng"},
-                        {"name": "OutOfTime_Count", "id": "OutOfTime_Count"},
-                        {"name": "Percent", "id": "Percent", "type": "numeric", "format": Format(precision=2, scheme="f", symbol_suffix="%")},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-                html.Div([
-                    html.H4("6) Total Out of Time by District - desc", style={'display': 'inline-block', 'margin-right': '10px'}),
-                    html.Button("📥", id="btn-download-district-outoftime", style={'background': 'none', 'border': 'none', 'cursor': 'pointer', 'font-size': '20px'}, title="Download Excel"),
-                ], style={'display': 'flex', 'align-items': 'center'}),
-                dash_table.DataTable(
-                    id="meta-total-outoftime-by-district",
-                    columns=[
-                        {"name": "District", "id": "District_Eng"},
-                        {"name": "OutOfTime_Count", "id": "OutOfTime_Count"},
-                        {"name": "Percent", "id": "Percent", "type": "numeric", "format": Format(precision=2, scheme="f", symbol_suffix="%")},
-                    ],
-                    style_table={"overflowX": "auto"},
-                    style_cell={"textAlign": "center"},
-                    page_size=10
-                ),
-            ], style={"width": "48%", "display": "inline-block", "marginLeft": "2%", "verticalAlign": "top"}),
-        ], style={"display": "flex", "justifyContent": "space-between"}),
-    ], style={"padding": "20px"})
-])
+    total_rows = len(df)
+    total_cols = len(df.columns)
+    total_districts = df["District"].nunique() if "District" in df.columns else "—"
+    total_offices = df["Office"].nunique() if "Office" in df.columns else "—"
+    total_services = df["Service"].nunique() if "Service" in df.columns else "—"
+    date_range = (
+        f"{df['month_dt'].min().strftime('%b %Y')}  →  {df['month_dt'].max().strftime('%b %Y')}"
+        if "month_dt" in df.columns
+        else "—"
+    )
 
-@app.callback(
-    [Output(f"meta-{table_id}", "data") for table_id in[
-        "total-services", "total-services-outoftime", "total-services-by-office",
-        "total-outoftime-by-office", "total-services-by-district", "total-outoftime-by-district"]],
-    Input("main-tabs", "value")
-)
-def update_metadata_tables(_):
-    srv = df.groupby("Service_Eng")[["Received"]].sum().reset_index()
-    srv.columns = ["Service_Eng", "Count"]
-    srv = srv.sort_values("Count", ascending=False).head(10)
-    srv["Percent"] = (srv["Count"] / srv["Count"].sum() * 100).round(2)
+    # ── KPI Cards ──────────────────────────────────────────────────────────────
+    st.markdown("#### 🗂️ At a Glance")
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    def kpi(col, label, value, icon=""):
+        col.markdown(
+            f"""
+            <div style='background:#f0f6ff; border-left: 5px solid #2d6a9f;
+                        padding: 14px 12px; border-radius: 8px; text-align:center;'>
+                <div style='font-size:1.5rem;'>{icon}</div>
+                <div style='font-size:1.55rem; font-weight:700; color:#1a3c5e;'>{value}</div>
+                <div style='font-size:0.78rem; color:#555; font-weight:600;
+                             text-transform:uppercase; letter-spacing:0.5px;'>{label}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    srv_oot = df.groupby("Service_Eng")[["Disposed_Out"]].sum().reset_index()
-    srv_oot.columns = ["Service_Eng", "OutOfTime_Count"]
-    srv_oot = srv_oot.sort_values("OutOfTime_Count", ascending=False).head(10)
-    srv_oot["Percent"] = (srv_oot["OutOfTime_Count"] / srv_oot["OutOfTime_Count"].sum() * 100).round(2)
+    kpi(k1, "Total Records",   f"{total_rows:,}",       "📝")
+    kpi(k2, "Total Columns",   total_cols,               "🗃️")
+    kpi(k3, "Districts",       total_districts,          "🏛️")
+    kpi(k4, "Offices",         total_offices,            "🏢")
+    kpi(k5, "Services",        total_services,           "⚙️")
+    kpi(k6, "Date Range",      date_range,               "📅")
 
-    office_rcv = df.groupby("Office_Eng")[["Received"]].sum().reset_index()
-    office_rcv_total = office_rcv["Received"].sum()
-    office_rcv = office_rcv.sort_values("Received", ascending=False).head(10)
-    office_rcv["Percent"] = (office_rcv["Received"] / office_rcv_total * 100).round(2)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    office_oot = df.groupby("Office_Eng")[["Disposed_Out"]].sum().reset_index()
-    office_oot.columns =["Office_Eng", "OutOfTime_Count"]
-    office_oot_total = office_oot["OutOfTime_Count"].sum()
-    office_oot = office_oot.sort_values("OutOfTime_Count", ascending=False).head(10)
-    office_oot["Percent"] = (office_oot["OutOfTime_Count"] / office_oot_total * 100).round(2)
+    # ── Column Information ─────────────────────────────────────────────────────
+    st.markdown("#### 📌 Column-level Information")
 
-    district_rcv = df.groupby("District_Eng")[["Received"]].sum().reset_index()
-    district_rcv_total = district_rcv["Received"].sum()
-    district_rcv = district_rcv.sort_values("Received", ascending=False).head(10)
-    district_rcv["Percent"] = (district_rcv["Received"] / district_rcv_total * 100).round(2)
+    TYPE_COLOR = {
+        "object":          ("#e8f0fe", "#1a56db"),
+        "int64":           ("#e8f8f0", "#1e7e4a"),
+        "float64":         ("#fff8e1", "#c17f00"),
+        "datetime64[ns]":  ("#fce8f3", "#9c27b0"),
+    }
 
-    district_oot = df.groupby("District_Eng")[["Disposed_Out"]].sum().reset_index()
-    district_oot.columns = ["District_Eng", "OutOfTime_Count"]
-    district_oot_total = district_oot["OutOfTime_Count"].sum()
-    district_oot = district_oot.sort_values("OutOfTime_Count", ascending=False).head(10)
-    district_oot["Percent"] = (district_oot["OutOfTime_Count"] / district_oot_total * 100).round(2)
+    meta_rows = []
+    for col in df.columns:
+        dtype      = str(df[col].dtype)
+        non_null   = int(df[col].notna().sum())
+        null_count = int(df[col].isna().sum())
+        unique     = int(df[col].nunique())
+        completeness = f"{(non_null / total_rows * 100):.1f}%" if total_rows else "—"
+        sample     = df[col].dropna().iloc[0] if non_null > 0 else "N/A"
+        meta_rows.append(
+            {
+                "Column":        col,
+                "Data Type":     dtype,
+                "Non-Null Count": f"{non_null:,}",
+                "Null Count":    null_count,
+                "Completeness":  completeness,
+                "Unique Values": f"{unique:,}",
+                "Sample Value":  str(sample),
+            }
+        )
 
-    return[
-        srv.to_dict('records'), srv_oot.to_dict('records'),
-        office_rcv.to_dict('records'), office_oot.to_dict('records'),
-        district_rcv.to_dict('records'), district_oot.to_dict('records')
-    ]
+    meta_df = pd.DataFrame(meta_rows)
+    st.dataframe(
+        meta_df.style.apply(
+            lambda _: [
+                f"background-color: {TYPE_COLOR.get(str(df[r['Column']].dtype), ('#fff','#000'))[0]};"
+                f"color: {TYPE_COLOR.get(str(df[r['Column']].dtype), ('#fff','#333'))[1]};"
+                f"font-weight:600;"
+                if c == "Data Type" else ""
+                for c in meta_df.columns
+            ],
+            axis=1,
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-# Download Callbacks
-@app.callback(
-    Output("download-services", "data"), Input("btn-download-services", "n_clicks"), State("meta-total-services", "data"), prevent_initial_call=True
-)
-def download_services(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "Total_Services.xlsx", sheet_name="Services", index=False)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-@app.callback(
-    Output("download-services-outoftime", "data"), Input("btn-download-services-outoftime", "n_clicks"), State("meta-total-services-outoftime", "data"), prevent_initial_call=True
-)
-def download_services_outoftime(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "Services_OutOfTime.xlsx", sheet_name="Services_OutOfTime", index=False)
+    # ── Summary Statistics ─────────────────────────────────────────────────────
+    st.markdown("#### 📊 Summary Statistics — Numeric Columns")
+    numeric_df = df.select_dtypes(include="number")
+    if not numeric_df.empty:
+        desc = numeric_df.describe().T.reset_index().rename(columns={"index": "Column"})
+        desc = desc.round(2)
+        st.dataframe(
+            desc.style.background_gradient(cmap="Blues", subset=["mean", "max"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No numeric columns found.")
 
-@app.callback(
-    Output("download-office-received", "data"), Input("btn-download-office-received", "n_clicks"), State("meta-total-services-by-office", "data"), prevent_initial_call=True
-)
-def download_office_received(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "Office_Received.xlsx", sheet_name="Office_Received", index=False)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-@app.callback(
-    Output("download-office-outoftime", "data"), Input("btn-download-office-outoftime", "n_clicks"), State("meta-total-outoftime-by-office", "data"), prevent_initial_call=True
-)
-def download_office_outoftime(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "Office_OutOfTime.xlsx", sheet_name="Office_OutOfTime", index=False)
+    # ── Categorical Distribution ───────────────────────────────────────────────
+    st.markdown("#### 🔠 Categorical Column Distribution")
+    cat_cols = df.select_dtypes(include="object").columns.tolist()
+    if cat_cols:
+        selected_col = st.selectbox(
+            "Select a categorical column to explore:", cat_cols, key="meta_cat_col"
+        )
+        dist = df[selected_col].value_counts().reset_index()
+        dist.columns = ["Value", "Count"]
+        dist["Share (%)"] = (dist["Count"] / dist["Count"].sum() * 100).round(2)
 
-@app.callback(
-    Output("download-district-received", "data"), Input("btn-download-district-received", "n_clicks"), State("meta-total-services-by-district", "data"), prevent_initial_call=True
-)
-def download_district_received(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "District_Received.xlsx", sheet_name="District_Received", index=False)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.dataframe(
+                dist.style.bar(subset=["Count"], color="#2d6a9f")
+                         .format({"Share (%)": "{:.2f}%"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+        with c2:
+            st.markdown(
+                f"""
+                <div style='background:#f0f6ff; border-radius:10px; padding:18px;'>
+                    <p style='margin:0; font-size:0.85rem; color:#555;'>Unique Values</p>
+                    <p style='margin:0; font-size:2rem; font-weight:700;
+                               color:#1a3c5e;'>{dist.shape[0]:,}</p>
+                    <hr style='border-color:#c8dff0;'>
+                    <p style='margin:0; font-size:0.85rem; color:#555;'>Top Value</p>
+                    <p style='margin:0; font-size:1rem; font-weight:600;
+                               color:#2d6a9f;'>{dist.iloc[0]['Value']}</p>
+                    <p style='margin:4px 0 0 0; font-size:0.85rem;
+                               color:#888;'>{dist.iloc[0]['Count']:,} records
+                               ({dist.iloc[0]['Share (%)']:.1f}%)</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No categorical columns found.")
 
-@app.callback(
-    Output("download-district-outoftime", "data"), Input("btn-download-district-outoftime", "n_clicks"), State("meta-total-outoftime-by-district", "data"), prevent_initial_call=True
-)
-def download_district_outoftime(n_clicks, data):
-    if data: return dcc.send_data_frame(pd.DataFrame(data).to_excel, "District_OutOfTime.xlsx", sheet_name="District_OutOfTime", index=False)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Footer Note ────────────────────────────────────────────────────────────
+    st.markdown(
+        """
+        <div style='background:#f8f9fa; border: 1px solid #d0d7de;
+                    border-radius:8px; padding:12px 18px;
+                    color:#555; font-size:0.82rem;'>
+            <strong>Note:</strong> This metadata view is auto-generated from the loaded dataset.
+            Completeness is calculated as the percentage of non-null values per column.
+            Sample values are drawn from the first available non-null record.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
