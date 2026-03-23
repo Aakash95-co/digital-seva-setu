@@ -1,5 +1,60 @@
 import streamlit as st
 import pandas as pd
+from dash import html, dcc
+import dash_bootstrap_components as dbc
+from app import app
+from data import df
+
+layout = html.Div([
+    html.H2("📋 Dataset Overview & Metadata", style={
+        'background': 'linear-gradient(90deg, #1a3c5e 0%, #2d6a9f 100%)',
+        'color': 'white', 'padding': '18px 28px', 'borderRadius': '10px', 'marginBottom': '20px'
+    }),
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Total Records"),
+            html.H3(f"{len(df):,}")
+        ])), md=2),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Total Columns"),
+            html.H3(len(df.columns))
+        ])), md=2),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Districts"),
+            html.H3(df["District"].nunique() if "District" in df.columns else "—")
+        ])), md=2),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Offices"),
+            html.H3(df["Office"].nunique() if "Office" in df.columns else "—")
+        ])), md=2),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Services"),
+            html.H3(df["Service"].nunique() if "Service" in df.columns else "—")
+        ])), md=2),
+    ], className="mb-4"),
+
+    html.H4("📌 Column-level Information"),
+
+    html.Div(id="metadata-table-container", children=[
+        dbc.Table([
+            html.Thead(html.Tr([
+                html.Th("Column"), html.Th("Data Type"), html.Th("Non-Null"),
+                html.Th("Nulls"), html.Th("Unique"), html.Th("Completeness"), html.Th("Sample")
+            ])),
+            html.Tbody([
+                html.Tr([
+                    html.Td(col),
+                    html.Td(str(df[col].dtype)),
+                    html.Td(f"{df[col].notna().sum():,}"),
+                    html.Td(f"{df[col].isna().sum():,}"),
+                    html.Td(f"{df[col].nunique():,}"),
+                    html.Td(f"{df[col].notna().sum() / len(df) * 100:.1f}%" if len(df) else "—"),
+                    html.Td(str(df[col].dropna().iloc[0]) if df[col].notna().sum() > 0 else "N/A"),
+                ]) for col in df.columns
+            ])
+        ], bordered=True, striped=True, hover=True, responsive=True, size="sm")
+    ])
+], style={"padding": "20px"})
 
 
 def render(df):
