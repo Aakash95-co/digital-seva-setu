@@ -19,33 +19,46 @@ def _oot_rate(oot, total):
 #              application_Disposed_Out_of_time, application_Disposed
 # ─────────────────────────────────────────────────────────────────────────────
 def _prepare_df(df):
-    df = df.copy()
-    df.columns = df.columns.str.strip()          # strip any whitespace
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['District', 'Office', 'Service', 'OOT', 'Total', 'month_dt'])
 
-    # Rename to internal names used throughout this module
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+
+    # Debug: print actual columns so mismatches are visible
+    print(f"[advanced_analytics] df_adv columns: {df.columns.tolist()}")
+
     rename_map = {
-        'District_name':                      'District',
-        'Office_name':                        'Office',
-        'Service_name':                       'Service',
-        'application_Disposed_Out_of_time':   'OOT',      # ← internal name is OOT
-        'application_Disposed':               'Total',
+        'District_name':                    'District',
+        'Office_name':                      'Office',
+        'Service_name':                     'Service',
+        'application_Disposed_Out_of_time': 'OOT',
+        'application_Disposed':             'Total',
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
     # Build month_dt
     if 'month_dt' not in df.columns:
-        df['month_dt'] = pd.to_datetime(
-            df['Year'].astype(str) + '-' + df['Month'].astype(str).str.zfill(2) + '-01',
-            format='%Y-%m-%d'
-        )
+        if 'Year' in df.columns and 'Month' in df.columns:
+            df['month_dt'] = pd.to_datetime(
+                df['Year'].astype(str) + '-' + df['Month'].astype(str).str.zfill(2) + '-01',
+                format='%Y-%m-%d'
+            )
+        else:
+            df['month_dt'] = pd.NaT
 
     for col in ['District', 'Office', 'Service']:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
+    # Only convert columns that actually exist after renaming
     for col in ['OOT', 'Total']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+        else:
+            print(f"[advanced_analytics] WARNING: column '{col}' not found after rename. "
+                  f"Available columns: {df.columns.tolist()}")
+            df[col] = 0   # add as zero so rest of module doesn't crash
 
     return df
 
