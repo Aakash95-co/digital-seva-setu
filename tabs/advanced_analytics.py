@@ -82,21 +82,17 @@ MONTH_NAME_TO_NUM = {v: k for k, v in MONTH_NAMES.items()}
 # Scoring engine  (uses internal column names: OOT, Total)
 # ─────────────────────────────────────────────────────────────────────────────
 def _score_offices(df, selected_district, selected_year, selected_month, min_count):
-    # Filter services below min_count threshold
-    svc_totals    = df.groupby('Service')['Total'].sum()
-    valid_services = svc_totals[svc_totals >= min_count].index
-    df_valid       = df[df['Service'].isin(valid_services)].copy()
 
-    # Snapshot for selected district / year / month
-    snap = df_valid[
-        (df_valid['District']           == selected_district) &
-        (df_valid['month_dt'].dt.year   == selected_year)     &
-        (df_valid['month_dt'].dt.month  == selected_month)
+    # Step 1: Snapshot for selected district / year / month
+    snap = df[
+        (df['District']           == selected_district) &
+        (df['month_dt'].dt.year   == selected_year)     &
+        (df['month_dt'].dt.month  == selected_month)
     ]
     if snap.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), 0.0
 
-    # Office-level aggregation for the snapshot
+    # Step 2: Aggregate by office for the snapshot
     office_snap = (
         snap.groupby('Office')
         .agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
@@ -106,18 +102,32 @@ def _score_offices(df, selected_district, selected_year, selected_month, min_cou
         lambda r: _oot_rate(r['OOT'], r['Total']), axis=1
     )
 
-    # District & state averages
-    district_avg = _oot_rate(office_snap['OOT'].sum(), office_snap['Total'].sum())
+    # Step 3: Compute district average BEFORE filtering (all offices included)
+    district_avg_total = round(office_snap['Total'].mean(), 2)
 
-    state_snap = df_valid[
-        (df_valid['month_dt'].dt.year  == selected_year) &
-        (df_valid['month_dt'].dt.month == selected_month)
+    # Step 4: Filter out offices below min_count threshold
+    if min_count > 0:
+        office_snap = office_snap[office_snap['Total'] >= min_count].reset_index(drop=True)
+
+    if office_snap.empty:
+        return pd.DataFrame(), district_avg_total
+
+    # Step 5: District & state averages (OOT rate) from filtered snapshot
+    district_avg_oot = _oot_rate(office_snap['OOT'].sum(), office_snap['Total'].sum())
+
+    state_snap = df[
+        (df['month_dt'].dt.year  == selected_year) &
+        (df['month_dt'].dt.month == selected_month)
     ]
-    state_avg = _oot_rate(state_snap['OOT'].sum(), state_snap['Total'].sum())
+    state_avg_oot = _oot_rate(state_snap['OOT'].sum(), state_snap['Total'].sum())
 
-    # Historical consistency (streak of months above district avg)
+    # Step 6: Historical consistency streak (only for offices that passed threshold)
+    valid_offices = office_snap['Office'].tolist()
     dist_history = (
-        df_valid[df_valid['District'] == selected_district]
+        df[
+            (df['District'] == selected_district) &
+            (df['Office'].isin(valid_offices))
+        ]
         .groupby(['Office', 'month_dt'])
         .agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
         .reset_index()
@@ -147,22 +157,22 @@ def _score_offices(df, selected_district, selected_year, selected_month, min_cou
 
     office_snap['Streak'] = office_snap['Office'].map(consistency_scores).fillna(0).astype(int)
 
-    # Composite score
+    # Step 7: Composite score
     max_oot = office_snap['OOT_Rate'].max() or 1
-    office_snap['F1_District']    = ((office_snap['OOT_Rate'] - district_avg) / max_oot * 100).clip(0)
-    office_snap['F2_State']       = ((office_snap['OOT_Rate'] - state_avg)    / max_oot * 100).clip(0)
+    office_snap['F1_District']    = ((office_snap['OOT_Rate'] - district_avg_oot) / max_oot * 100).clip(0)
+    office_snap['F2_State']       = ((office_snap['OOT_Rate'] - state_avg_oot)    / max_oot * 100).clip(0)
     office_snap['F3_Consistency'] = office_snap['Streak'].apply(
         lambda s: 100 if s >= 9 else 66 if s >= 6 else 33 if s >= 3 else 0
     )
-    office_snap['Composite_Score'] = (
+    office_snap['Composite_Score']  = (
         0.35 * office_snap['F1_District'] +
         0.35 * office_snap['F2_State']    +
         0.30 * office_snap['F3_Consistency']
     ).round(2)
-    office_snap['District_Avg_OOT'] = district_avg
-    office_snap['State_Avg_OOT']    = state_avg
+    office_snap['District_Avg_OOT'] = district_avg_oot
+    office_snap['State_Avg_OOT']    = state_avg_oot
 
-    return office_snap.sort_values('Composite_Score', ascending=False).reset_index(drop=True)
+    return office_snap.sort_values('Composite_Score', ascending=False).reset_index(drop=True), district_avg_total
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,26 +309,53 @@ def run_analysis(n_clicks, district, year, month, min_count):
     if not all([district, year, month]):
         return dbc.Alert("Please select all filters.", color="warning")
 
-    min_count = int(min_count or 0)
-    scored    = _score_offices(_df, district, int(year), int(month), min_count)
+    min_count  = int(min_count or 0)
+    scored, district_avg_total = _score_offices(_df, district, int(year), int(month), min_count)
 
     if scored.empty:
-        return dbc.Alert("No data available for the selected filters.", color="warning")
+        return dbc.Alert(
+            f"No offices with Total ≥ {min_count} found for the selected filters.",
+            color="warning"
+        )
 
-    district_avg = scored['District_Avg_OOT'].iloc[0]
-    state_avg    = scored['State_Avg_OOT'].iloc[0]
-    month_name   = MONTH_NAMES.get(int(month), str(month))
+    district_avg_oot = scored['District_Avg_OOT'].iloc[0]
+    state_avg_oot    = scored['State_Avg_OOT'].iloc[0]
+    month_name       = MONTH_NAMES.get(int(month), str(month))
 
     # ── KPI bar ──────────────────────────────────────────────────────────────
     kpi_row = dbc.Row([
-        dbc.Col(_kpi_card("Offices Analysed",   len(scored)), md=3),
-        dbc.Col(_kpi_card("District OOT Avg",   f"{district_avg:.1f}%",
-                          color="#c0392b", bg="#fff5f5", border="#e74c3c"), md=3),
-        dbc.Col(_kpi_card("State OOT Avg",      f"{state_avg:.1f}%",
-                          color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=3),
-        dbc.Col(_kpi_card("Flagged (≥3 months)", int((scored['Streak'] >= 3).sum()),
-                          color="#e67e22", bg="#fff8f0", border="#e67e22"), md=3),
+        dbc.Col(_kpi_card("Offices Analysed",
+                          len(scored)), md=2),
+        dbc.Col(_kpi_card("Avg Total Applications",
+                          f"{district_avg_total:,.1f}",
+                          color="#1a3c5e", bg="#eaf4ff", border="#2d6a9f"), md=2),
+        dbc.Col(_kpi_card("Min Count Threshold",
+                          f"≥ {min_count}",
+                          color="#555", bg="#f8f9fa", border="#aaa"), md=2),
+        dbc.Col(_kpi_card("District OOT Avg",
+                          f"{district_avg_oot:.1f}%",
+                          color="#c0392b", bg="#fff5f5", border="#e74c3c"), md=2),
+        dbc.Col(_kpi_card("State OOT Avg",
+                          f"{state_avg_oot:.1f}%",
+                          color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=2),
+        dbc.Col(_kpi_card("Flagged (≥3 months)",
+                          int((scored['Streak'] >= 3).sum()),
+                          color="#e67e22", bg="#fff8f0", border="#e67e22"), md=2),
     ], className='mb-4')
+
+    # ── Threshold info banner ─────────────────────────────────────────────────
+    threshold_banner = dbc.Alert(
+        [
+            html.Strong(f"📊 District: {district}  |  {month_name} {year}"),
+            html.Br(),
+            f"Average total applications across all offices (before filtering): ",
+            html.Strong(f"{district_avg_total:,.1f}"),
+            f"  —  Offices with Total < {min_count} have been excluded from analysis."
+            if min_count > 0 else
+            "  —  No minimum threshold applied (all offices included)."
+        ],
+        color="info", className="mb-4"
+    )
 
     # ── Table ────────────────────────────────────────────────────────────────
     display_cols = ['Office', 'Total', 'OOT', 'OOT_Rate',
@@ -342,15 +379,15 @@ def run_analysis(n_clicks, district, year, month, min_count):
         scored.sort_values('Composite_Score', ascending=False),
         x='Office', y='OOT_Rate', color='Composite_Score',
         color_continuous_scale='Reds',
-        title=f"Out-of-Time Rate by Office — {month_name} {year}",
+        title=f"Out-of-Time Rate by Office — {month_name} {year}  |  {district}",
         labels={'OOT_Rate': '% Out of Time', 'Composite_Score': 'Composite Score'},
         text='OOT_Rate',
     )
-    fig.add_hline(y=district_avg, line_dash='dash', line_color='#2980b9',
-                  annotation_text=f"District Avg: {district_avg:.1f}%",
+    fig.add_hline(y=district_avg_oot, line_dash='dash', line_color='#2980b9',
+                  annotation_text=f"District Avg OOT: {district_avg_oot:.1f}%",
                   annotation_position="top left")
-    fig.add_hline(y=state_avg, line_dash='dot', line_color='#8e44ad',
-                  annotation_text=f"State Avg: {state_avg:.1f}%",
+    fig.add_hline(y=state_avg_oot, line_dash='dot', line_color='#8e44ad',
+                  annotation_text=f"State Avg OOT: {state_avg_oot:.1f}%",
                   annotation_position="bottom right")
     fig.update_layout(xaxis_tickangle=-45, height=480)
     fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
@@ -368,12 +405,12 @@ def run_analysis(n_clicks, district, year, month, min_count):
             ), style={'background': '#fff0f0', 'color': '#c0392b'}),
             dbc.CardBody([
                 dbc.Row([
+                    dbc.Col(_kpi_card("Total Applications", f"{int(row['Total']):,}",
+                                      color="#1a3c5e", bg="#eaf4ff", border="#2d6a9f"), md=3),
                     dbc.Col(_kpi_card("OOT Rate",     f"{row['OOT_Rate']:.1f}%",
                                       color="#c0392b", bg="#fff5f5", border="#e74c3c"), md=3),
                     dbc.Col(_kpi_card("District Avg", f"{row['District_Avg_OOT']:.1f}%",
                                       color="#2980b9", bg="#eaf4ff", border="#3498db"), md=3),
-                    dbc.Col(_kpi_card("State Avg",    f"{row['State_Avg_OOT']:.1f}%",
-                                      color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=3),
                     dbc.Col(_kpi_card("Bad Months",   f"{int(row['Streak'])}",
                                       color="#e67e22", bg="#fff8f0", border="#e67e22"), md=3),
                 ], className='mb-3'),
@@ -405,12 +442,12 @@ def run_analysis(n_clicks, district, year, month, min_count):
             ), style={'background': '#f0fff4', 'color': '#1e8449'}),
             dbc.CardBody([
                 dbc.Row([
+                    dbc.Col(_kpi_card("Total Applications", f"{int(row['Total']):,}",
+                                      color="#1a3c5e", bg="#eaf4ff", border="#2d6a9f"), md=3),
                     dbc.Col(_kpi_card("OOT Rate",     f"{row['OOT_Rate']:.1f}%",
                                       color="#1e8449", bg="#f0fff4", border="#27ae60"), md=3),
                     dbc.Col(_kpi_card("District Avg", f"{row['District_Avg_OOT']:.1f}%",
                                       color="#2980b9", bg="#eaf4ff", border="#3498db"), md=3),
-                    dbc.Col(_kpi_card("State Avg",    f"{row['State_Avg_OOT']:.1f}%",
-                                      color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=3),
                     dbc.Col(_kpi_card("Bad Months",   f"{int(row['Streak'])}",
                                       color="#27ae60", bg="#f0fff4", border="#27ae60"), md=3),
                 ], className='mb-3'),
@@ -431,12 +468,14 @@ def run_analysis(n_clicks, district, year, month, min_count):
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     disclaimer = html.Div(
-        f"Methodology: Services with total count below {min_count} records are excluded. "
+        f"Methodology: Offices with Total < {min_count} are excluded. "
+        f"Average total applications (all offices before filter): {district_avg_total:,.1f}. "
         f"Composite score = District Benchmark 35% · State Average 35% · Consistency 30%. "
-        f"A 'bad month' is when office OOT rate exceeds district average. "
-        f"Streaks of ≥3, ≥6, ≥9 months flagged with 🔔, ⚠️, 🚨.",
+        f"A 'bad month' = office OOT rate exceeds district average that month. "
+        f"Streaks ≥3, ≥6, ≥9 months flagged with 🔔, ⚠️, 🚨.",
         style={'background': '#f8f9fa', 'border': '1px solid #d0d7de', 'borderRadius': '8px',
                'padding': '12px 18px', 'color': '#555', 'fontSize': '0.82rem'}
     )
 
-    return html.Div([kpi_row, table_section, chart_section, worst_section, best_section, disclaimer])
+    return html.Div([kpi_row, threshold_banner, table_section, chart_section,
+                     worst_section, best_section, disclaimer])
