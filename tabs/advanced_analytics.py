@@ -16,7 +16,9 @@ def _oot_rate(oot, total):
 # ─────────────────────────────────────────────────────────────────────────────
 # Prepare df_adv — rename raw CSV columns to internal names
 # Raw columns: Year, Month, Service_name, District_name, Office_name,
-#              application_Disposed_Out_of_time, application_Disposed
+#              application_Received, application_Disposed,
+#              application_Disposed_Out_of_time, application_Disposed_with_in_time,
+#              Pending, Total   ← NOTE: 'Total' already exists in CSV
 # ─────────────────────────────────────────────────────────────────────────────
 def _prepare_df(df):
     if df is None or df.empty:
@@ -25,8 +27,9 @@ def _prepare_df(df):
     df = df.copy()
     df.columns = df.columns.str.strip()
 
-    # Debug: print actual columns so mismatches are visible
-    print(f"[advanced_analytics] df_adv columns: {df.columns.tolist()}")
+    # Drop the raw 'Total' column if present — we will use application_Disposed as 'Total'
+    if 'Total' in df.columns and 'application_Disposed' in df.columns:
+        df = df.drop(columns=['Total'])
 
     rename_map = {
         'District_name':                    'District',
@@ -51,14 +54,16 @@ def _prepare_df(df):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    # Only convert columns that actually exist after renaming
     for col in ['OOT', 'Total']:
         if col in df.columns:
+            # Guard: ensure it is a Series not a DataFrame (duplicate columns cause this)
+            if isinstance(df[col], pd.DataFrame):
+                print(f"[advanced_analytics] WARNING: '{col}' is duplicated — keeping first occurrence.")
+                df = df.loc[:, ~df.columns.duplicated()]
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
         else:
-            print(f"[advanced_analytics] WARNING: column '{col}' not found after rename. "
-                  f"Available columns: {df.columns.tolist()}")
-            df[col] = 0   # add as zero so rest of module doesn't crash
+            print(f"[advanced_analytics] WARNING: '{col}' not found. Available: {df.columns.tolist()}")
+            df[col] = 0
 
     return df
 
