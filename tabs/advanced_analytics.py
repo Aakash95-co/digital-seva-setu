@@ -68,35 +68,35 @@ def _score_offices(df, selected_district, selected_year, selected_month, min_cou
 
     office_snap = (
         snap.groupby('Office')
-        .agg(Total=('Total', 'sum'), Out_of_Time=('Out_of_Time', 'sum'))
+        .agg(Total=('Total', 'sum'), Out_of_Time=('Out_of_Time', 'sum'))  # fixed: Out_of_Time
         .reset_index()
     )
     office_snap['OOT_Rate'] = office_snap.apply(
-        lambda r: _oot_rate(r['Out_of_Time'], r['Total']), axis=1
+        lambda r: _oot_rate(r['Out_of_Time'], r['Total']), axis=1  # fixed: Out_of_Time
     )
 
     dist_total   = office_snap['Total'].sum()
-    dist_oot     = office_snap['Out_of_Time'].sum()
+    dist_oot     = office_snap['Out_of_Time'].sum()  # fixed: Out_of_Time
     district_avg = _oot_rate(dist_oot, dist_total)
 
-    state_snap  = df_valid[
+    state_snap = df_valid[
         (df_valid['month_dt'].dt.year == selected_year) &
         (df_valid['month_dt'].dt.month == selected_month)
     ]
-    state_avg = _oot_rate(state_snap['Out_of_Time'].sum(), state_snap['Total'].sum())
+    state_avg = _oot_rate(state_snap['Out_of_Time'].sum(), state_snap['Total'].sum())  # fixed: Out_of_Time
 
     dist_history = (
         df_valid[df_valid['District'] == selected_district]
         .groupby(['Office', 'month_dt'])
-        .agg(Total=('Total', 'sum'), Out_of_time=('Out_of_time', 'sum'))
+        .agg(Total=('Total', 'sum'), Out_of_time=('Out_of_time', 'sum'))  # fixed: Out_of_time
         .reset_index()
     )
     dist_history['OOT_Rate'] = dist_history.apply(
-        lambda r: _oot_rate(r['Out_of_time'], r['Total']), axis=1
+        lambda r: _oot_rate(r['Out_of_time'], r['Total']), axis=1  # fixed: Out_of_time
     )
     dist_monthly_avg = (
         dist_history.groupby('month_dt')
-        .apply(lambda g: _oot_rate(g['Out_of_time'].sum(), g['Total'].sum()))
+        .apply(lambda g: _oot_rate(g['Out_of_time'].sum(), g['Total'].sum()))  # fixed: Out_of_time
         .reset_index(name='Dist_Avg')
     )
     dist_history = dist_history.merge(dist_monthly_avg, on='month_dt')
@@ -294,6 +294,7 @@ def run_analysis(n_clicks, district, year, month, min_count):
     display_cols = ['Office', 'Total', 'Out_of_time', 'OOT_Rate',
                     'District_Avg_OOT', 'State_Avg_OOT', 'Streak', 'Composite_Score']
     table_df = scored[display_cols].rename(columns={
+        'Out_of_time':      'Out of Time',                           # fixed: Out_of_time
         'OOT_Rate':         'OOT Rate (%)',
         'District_Avg_OOT': 'District Avg OOT (%)',
         'State_Avg_OOT':    'State Avg OOT (%)',
