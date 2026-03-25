@@ -495,7 +495,7 @@ def _generate_pdf(year, month, min_count, max_count):
                              color=colors.HexColor('#2d6a9f'), spaceAfter=8))
 
     formula_text = (
-        "Formula: Score = 100 − norm(0.25×F1 + 0.25×F2 + 0.25×F3 + 0.25×F4)  |  "
+        "Formula: Score = 100 − norm(0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4)  |  "
         "F1=District OOT magnitude (vs 12m rolling avg)  |  "
         "F2=State OOT magnitude (vs 12m rolling avg)  |  "
         "F3=Consistency streak penalty  |  "
@@ -1056,7 +1056,7 @@ def toggle_detail(n_clicks_list, is_open_list, district, year, month):
     for _, sr in svc_snap.iterrows():
         st      = svc_streaks.get(sr['Service'], 0)
         is_bad  = sr['vs_State'] > 0
-        domina  = sr['OOT_Share'] > 80
+        domina  = sr['OOT_Share'] >= 80
         bg      = '#fff5f5' if (is_bad or domina) else '#f0fff4'
         rows.append(html.Tr([
             html.Td(sr['Service'],               style={'fontWeight': '600'}),
