@@ -2,7 +2,7 @@ import streamlit as st
 import io
 import pandas as pd
 import plotly.express as px
-from dash import html, dcc, Input, Output, State, ALL
+from dash import html, dcc, Input, Output, State, ALL, callback_context
 import dash_bootstrap_components as dbc
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -757,30 +757,29 @@ def run_analysis(n_clicks, district, year, month, min_count):
     prevent_initial_call=True,
 )
 def toggle_detail(n_clicks_list, is_open_list, district, year, month):
-    from dash import ctx
-    if not ctx.triggered_id:
+    if not callback_context.triggered_id:
         return is_open_list, [dash.no_update] * len(is_open_list)
 
-    office      = ctx.triggered_id['index']
-    year, month = int(year), int(month)
-    state_svc_avg = _state_service_avg(_df, year, month)
+    office = callback_context.triggered_id['index']
+    year   = int(year)
+    month  = int(month)
 
-    # Find which index triggered
-    triggered_idx = next(
-        i for i, b in enumerate(
-            [ctx.triggered_id == {'type': 'aa-detail-btn', 'index': o}
-             for o in [ctx.triggered_id['index']]]
-        ) if b
-    )
-    # Simpler: find by office name from ALL ids
-    from dash import callback_context
-    all_ids     = [t['id']['index'] for t in callback_context.inputs_list[0]]
-    target_idx  = all_ids.index(office)
+    # Find the index of the triggered office in the ALL list
+    all_ids    = [t['id']['index'] for t in callback_context.inputs_list[0]]
+    target_idx = all_ids.index(office)
 
-    new_open    = list(is_open_list)
+    # Toggle only the triggered collapse; leave others unchanged
+    new_open = list(is_open_list)
     new_open[target_idx] = not is_open_list[target_idx]
 
+    # If closing, just return without rebuilding content
+    panels = [dash.no_update] * len(is_open_list)
+    if not new_open[target_idx]:
+        return new_open, panels
+
     # Build service detail content
+    state_svc_avg = _state_service_avg(_df, year, month)
+
     snap = _df[
         (_df['District']          == district) &
         (_df['Office']            == office)   &
@@ -789,7 +788,7 @@ def toggle_detail(n_clicks_list, is_open_list, district, year, month):
     ]
     svc_snap = (
         snap.groupby('Service')
-        .agg(Total=('Total','sum'), OOT=('OOT','sum'))
+        .agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
         .reset_index()
     )
     svc_snap['OOT_Rate']      = svc_snap.apply(
@@ -803,8 +802,8 @@ def toggle_detail(n_clicks_list, is_open_list, district, year, month):
 
     rows = []
     for _, sr in svc_snap.iterrows():
-        st       = svc_streaks.get(sr['Service'], 0)
-        is_bad   = sr['vs_State'] > 0
+        st        = svc_streaks.get(sr['Service'], 0)
+        is_bad    = sr['vs_State'] > 0
         row_color = '#fff5f5' if is_bad else '#f0fff4'
         rows.append(
             html.Tr([
@@ -823,8 +822,7 @@ def toggle_detail(n_clicks_list, is_open_list, district, year, month):
                 ),
                 html.Td(_streak_label(st),                 style={'textAlign': 'center'}),
                 html.Td(_streak_magnitude(st),             style={'textAlign': 'center',
-                                                                   'fontSize': '0.8rem',
-                                                                   'color': '#555'}),
+                                                                   'fontSize': '0.8rem', 'color': '#555'}),
             ], style={'background': row_color})
         )
 
@@ -853,7 +851,5 @@ def toggle_detail(n_clicks_list, is_open_list, district, year, month):
     ], style={'padding': '10px', 'background': '#fafafa',
               'border': '1px solid #ddd', 'borderRadius': '8px'})
 
-    panels      = [dash.no_update] * len(is_open_list)
     panels[target_idx] = detail_table
-
     return new_open, panels
