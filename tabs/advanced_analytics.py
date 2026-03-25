@@ -1,719 +1,637 @@
 import dash
 import io
+import json
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from dash import html, dcc, Input, Output, State, ALL, callback_context
 import dash_bootstrap_components as dbc
 from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
+from reportlab.lib import colors as rl_colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table as RLTable,
+    TableStyle, HRFlowable, KeepTogether
+)
 from reportlab.lib.units import cm
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
 import base64
-import json
 from app import app
 from data import df_adv
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper
-# ─────────────────────────────────────────────────────────────────────────────
-def _oot_rate(oot, total):
-    return round((oot / total * 100), 2) if total > 0 else 0.0
+# ═════════════════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ═════════════════════════════════════════════════════════════════════════════
+MONTH_NAMES = {
+    1: "January", 2: "February", 3: "March",    4: "April",
+    5: "May",     6: "June",     7: "July",      8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+
+SUNBURST_COLORS = ['#FFAE57', '#FF7853', '#EA5151', '#CC3F57', '#9A2555',
+                   '#2d6a9f', '#1abc9c', '#e67e22', '#3498db', '#8e44ad']
+SUNBURST_BG     = '#2E2733'
+
+STREAK_TOOLTIP = (
+    "Bad-Month Streak: Consecutive months (ending at selected month) where "
+    "this office OOT% exceeded the district OOT% for that month.\n"
+    "📌 1-2 = Minor  |  🔔 3-5 = Watch  |  ⚠️ 6-8 = Sustained  |  🚨 ≥9 = Critical"
+)
+
+COMPOSITE_TOOLTIP = (
+    "Score (100=best, 0=worst)\n"
+    "= 100 − norm(0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4)\n"
+    "F1: |Office OOT% − District OOT%| magnitude\n"
+    "F2: |Office OOT% − State OOT%| magnitude\n"
+    "F3: Streak penalty (≥9→100, ≥6→66, ≥3→33, else 0)\n"
+    "F4: 100 if top service ≥80% of OOT, else 0"
+)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prepare df
-# ─────────────────────────────────────────────────────────────────────────────
-def _prepare_df(df):
-    if df is None or df.empty:
+# ═════════════════════════════════════════════════════════════════════════════
+# DATA PREPARATION  (runs once at import)
+# ═════════════════════════════════════════════════════════════════════════════
+def _prepare_df(raw):
+    if raw is None or raw.empty:
         return pd.DataFrame(columns=['District','Office','Service','OOT','Total','month_dt'])
-    df = df.copy()
+
+    df = raw.copy()
     df.columns = df.columns.str.strip()
+
     if 'Total' in df.columns and 'application_Disposed' in df.columns:
-        df = df.drop(columns=['Total'])
-    rename_map = {
-        'District_name':                    'District',
-        'Office_name':                      'Office',
-        'Service_name':                     'Service',
+        df.drop(columns=['Total'], inplace=True)
+
+    _map = {
+        'District_name': 'District', 'Office_name': 'Office',
+        'Service_name': 'Service',
         'application_Disposed_Out_of_time': 'OOT',
-        'application_Disposed':             'Total',
+        'application_Disposed': 'Total',
     }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    df.rename(columns={k: v for k, v in _map.items() if k in df.columns}, inplace=True)
+
     if 'month_dt' not in df.columns:
         if 'Year' in df.columns and 'Month' in df.columns:
             df['month_dt'] = pd.to_datetime(
-                df['Year'].astype(str) + '-' +
-                df['Month'].astype(str).str.zfill(2) + '-01', format='%Y-%m-%d')
+                df['Year'].astype(str) + '-' + df['Month'].astype(str).str.zfill(2) + '-01')
         else:
             df['month_dt'] = pd.NaT
-    for col in ['District','Office','Service']:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-    for col in ['OOT','Total']:
-        if col in df.columns:
-            if isinstance(df[col], pd.DataFrame):
-                df = df.loc[:, ~df.columns.duplicated()]
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-        else:
-            df[col] = 0
+
+    for c in ('District', 'Office', 'Service'):
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+    for c in ('OOT', 'Total'):
+        df = df.loc[:, ~df.columns.duplicated()]
+        df[c] = pd.to_numeric(df.get(c, 0), errors='coerce').fillna(0).astype(int)
     return df
 
 
 _df = _prepare_df(df_adv)
 
-MONTH_NAMES = {
-    1:"January",2:"February",3:"March",4:"April",
-    5:"May",6:"June",7:"July",8:"August",
-    9:"September",10:"October",11:"November",12:"December"
-}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pre-compute monthly caches ONCE at startup
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# PRE-COMPUTED CACHES  (all groupby done once)
+# ═════════════════════════════════════════════════════════════════════════════
+def _oot_pct(s):
+    return np.where(s['Total'] > 0, (s['OOT'] / s['Total'] * 100).round(2), 0.0)
+
+
 def _build_caches(df):
-    off_monthly = (
-        df.groupby(['District','Office','month_dt'])
-        .agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-    )
-    off_monthly['OOT_Rate'] = np.where(
-        off_monthly['Total'] > 0,
-        (off_monthly['OOT'] / off_monthly['Total'] * 100).round(2), 0.0)
+    if df.empty:
+        empty = pd.DataFrame(columns=['OOT', 'Total', 'OOT_Rate', 'month_dt'])
+        return empty.copy(), empty.copy(), empty.copy(), empty.copy(), empty.copy()
 
-    dist_monthly = (
-        df.groupby(['District','month_dt'])
-        .agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-    )
-    dist_monthly['OOT_Rate'] = np.where(
-        dist_monthly['Total'] > 0,
-        (dist_monthly['OOT'] / dist_monthly['Total'] * 100).round(2), 0.0)
+    om = df.groupby(['District', 'Office', 'month_dt'], as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    om['OOT_Rate'] = _oot_pct(om)
 
-    state_monthly = (
-        df.groupby('month_dt')
-        .agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-    )
-    state_monthly['OOT_Rate'] = np.where(
-        state_monthly['Total'] > 0,
-        (state_monthly['OOT'] / state_monthly['Total'] * 100).round(2), 0.0)
+    dm = df.groupby(['District', 'month_dt'], as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    dm['OOT_Rate'] = _oot_pct(dm)
 
-    state_svc_monthly = (
-        df.groupby(['Service','month_dt'])
-        .agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-    )
-    state_svc_monthly['OOT_Rate'] = np.where(
-        state_svc_monthly['Total'] > 0,
-        (state_svc_monthly['OOT'] / state_svc_monthly['Total'] * 100).round(2), 0.0)
+    sm = df.groupby('month_dt', as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    sm['OOT_Rate'] = _oot_pct(sm)
 
-    off_svc_monthly = (
-        df.groupby(['Office','Service','month_dt'])
-        .agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-    )
-    off_svc_monthly['OOT_Rate'] = np.where(
-        off_svc_monthly['Total'] > 0,
-        (off_svc_monthly['OOT'] / off_svc_monthly['Total'] * 100).round(2), 0.0)
+    ssm = df.groupby(['Service', 'month_dt'], as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    ssm['OOT_Rate'] = _oot_pct(ssm)
 
-    return off_monthly, dist_monthly, state_monthly, state_svc_monthly, off_svc_monthly
+    osm = df.groupby(['Office', 'Service', 'month_dt'], as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    osm['OOT_Rate'] = _oot_pct(osm)
+
+    # add pre-computed year/month int columns for fast filtering
+    for frame in (om, dm, sm, ssm, osm):
+        frame['_y'] = frame['month_dt'].dt.year
+        frame['_m'] = frame['month_dt'].dt.month
+
+    return om, dm, sm, ssm, osm
 
 
-(_OFF_MONTHLY, _DIST_MONTHLY, _STATE_MONTHLY,
- _STATE_SVC_MONTHLY, _OFF_SVC_MONTHLY) = _build_caches(_df)
+_OM, _DM, _SM, _SSM, _OSM = _build_caches(_df)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Snapshot averages (selected month only)
-# ─────────────────────────────────────────────────────────────────────────────
-def _dist_snap_oot(district, year, month):
-    row = _DIST_MONTHLY[
-        (_DIST_MONTHLY['District']           == district) &
-        (_DIST_MONTHLY['month_dt'].dt.year   == year)     &
-        (_DIST_MONTHLY['month_dt'].dt.month  == month)
-    ]
-    return row['OOT_Rate'].iloc[0] if not row.empty else 0.0
+# ═════════════════════════════════════════════════════════════════════════════
+# FAST LOOKUP HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+def _oot_rate(oot, total):
+    return round(oot / total * 100, 2) if total > 0 else 0.0
 
 
-def _state_snap_oot(year, month):
-    row = _STATE_MONTHLY[
-        (_STATE_MONTHLY['month_dt'].dt.year  == year) &
-        (_STATE_MONTHLY['month_dt'].dt.month == month)
-    ]
-    return row['OOT_Rate'].iloc[0] if not row.empty else 0.0
+def _dist_oot(district, y, m):
+    r = _DM[(_DM['District'] == district) & (_DM['_y'] == y) & (_DM['_m'] == m)]
+    return float(r['OOT_Rate'].iloc[0]) if len(r) else 0.0
 
 
-def _state_service_avg(year, month):
-    snap = _STATE_SVC_MONTHLY[
-        (_STATE_SVC_MONTHLY['month_dt'].dt.year  == year) &
-        (_STATE_SVC_MONTHLY['month_dt'].dt.month == month)
-    ]
-    return snap.set_index('Service')['OOT_Rate'].to_dict()
+def _state_oot(y, m):
+    r = _SM[(_SM['_y'] == y) & (_SM['_m'] == m)]
+    return float(r['OOT_Rate'].iloc[0]) if len(r) else 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Service consistency (vs state svc avg streak)
-# ─────────────────────────────────────────────────────────────────────────────
-def _service_consistency(office, year, month):
-    cutoff   = pd.Timestamp(year=year, month=month, day=1)
-    off_hist = _OFF_SVC_MONTHLY[
-        (_OFF_SVC_MONTHLY['Office']    == office) &
-        (_OFF_SVC_MONTHLY['month_dt'] <= cutoff)
+def _state_svc_avg(y, m):
+    s = _SSM[(_SSM['_y'] == y) & (_SSM['_m'] == m)]
+    return dict(zip(s['Service'], s['OOT_Rate']))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STREAK COMPUTATION  (vectorised per district)
+# ═════════════════════════════════════════════════════════════════════════════
+def _compute_streaks(district, valid_offices, cutoff_ts):
+    """Return {office: streak_int} for valid_offices up to cutoff_ts."""
+    hist = _OM[
+        (_OM['District'] == district) &
+        (_OM['Office'].isin(valid_offices)) &
+        (_OM['month_dt'] <= cutoff_ts)
     ].copy()
-    if off_hist.empty:
-        return {}
-    merged = off_hist.merge(
-        _STATE_SVC_MONTHLY[['Service','month_dt','OOT_Rate']]
-        .rename(columns={'OOT_Rate':'State_Avg'}),
-        on=['Service','month_dt'], how='left'
-    )
-    merged['State_Avg'] = merged['State_Avg'].fillna(0)
-    merged['is_bad']    = merged['OOT_Rate'] > merged['State_Avg']
+    if hist.empty:
+        return {o: 0 for o in valid_offices}
+
+    # district avg per month
+    davg = _DM[(_DM['District'] == district) & (_DM['month_dt'] <= cutoff_ts)]
+    davg_map = dict(zip(davg['month_dt'], davg['OOT_Rate']))
+    hist['d_avg'] = hist['month_dt'].map(davg_map).fillna(0)
+    hist['bad']   = hist['OOT_Rate'] > hist['d_avg']
+    hist.sort_values(['Office', 'month_dt'], inplace=True)
+
     streaks = {}
-    for svc, grp in merged.groupby('Service'):
-        flags  = grp.sort_values('month_dt')['is_bad'].tolist()
-        streak = 0
+    for off, grp in hist.groupby('Office'):
+        flags = grp['bad'].values
+        s = 0
         for f in reversed(flags):
-            if f: streak += 1
-            else: break
-        streaks[svc] = streak
+            if f:
+                s += 1
+            else:
+                break
+        streaks[off] = s
+    for o in valid_offices:
+        streaks.setdefault(o, 0)
     return streaks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Streak helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def _service_consistency(office, y, m):
+    cutoff = pd.Timestamp(year=y, month=m, day=1)
+    oh = _OSM[(_OSM['Office'] == office) & (_OSM['month_dt'] <= cutoff)].copy()
+    if oh.empty:
+        return {}
+    mg = oh.merge(
+        _SSM[['Service', 'month_dt', 'OOT_Rate']].rename(columns={'OOT_Rate': 'sa'}),
+        on=['Service', 'month_dt'], how='left')
+    mg['sa']  = mg['sa'].fillna(0)
+    mg['bad'] = mg['OOT_Rate'] > mg['sa']
+    mg.sort_values(['Service', 'month_dt'], inplace=True)
+    out = {}
+    for svc, grp in mg.groupby('Service'):
+        flags = grp['bad'].values
+        s = 0
+        for f in reversed(flags):
+            if f:
+                s += 1
+            else:
+                break
+        out[svc] = s
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STREAK DISPLAY HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 def _streak_label(s):
-    if s >= 9:  return f"🚨 {s} months (Critical)"
-    if s >= 6:  return f"⚠️ {s} months (Sustained)"
-    if s >= 3:  return f"🔔 {s} months (Watch)"
-    if s >= 1:  return f"📌 {s} month(s) (Minor)"
+    if s >= 9: return f"🚨 {s} months (Critical)"
+    if s >= 6: return f"⚠️ {s} months (Sustained)"
+    if s >= 3: return f"🔔 {s} months (Watch)"
+    if s >= 1: return f"📌 {s} month(s) (Minor)"
     return "✅ No streak"
 
-def _streak_magnitude(s):
-    if s >= 9:  return "Critical — persistent systemic failure"
-    if s >= 6:  return "Sustained — serious performance issue"
-    if s >= 3:  return "Moderate — requires monitoring"
-    if s >= 1:  return "Minor — early warning"
+
+def _streak_mag(s):
+    if s >= 9: return "Critical — persistent systemic failure"
+    if s >= 6: return "Sustained — serious performance issue"
+    if s >= 3: return "Moderate — requires monitoring"
+    if s >= 1: return "Minor — early warning"
     return "None"
 
-STREAK_TOOLTIP = (
-    "Bad-Month Streak: Consecutive months ending at selected month where this office OOT% "
-    "exceeded the district average OOT% for that month.\n"
-    "🔔 ≥3 = Watch  |  ⚠️ ≥6 = Sustained  |  🚨 ≥9 = Critical"
-)
 
-COMPOSITE_TOOLTIP = (
-    "Composite Score (100 = best, 0 = worst)\n"
-    "Formula: Score = 100 − norm(0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4)\n"
-    "F1: Office OOT% vs District OOT% (current month) — magnitude above/below avg\n"
-    "F2: Office OOT% vs State OOT% (current month) — magnitude above/below avg\n"
-    "F3: Streak penalty → ≥9=100, ≥6=66, ≥3=33, else 0\n"
-    "F4: Service concentration → 25 if no service ≥80% of OOT, 0 if one service ≥80%\n"
-    "norm = rescale raw to 0–100 across offices. Higher score = better office."
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 # SCORING ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-def _score_offices(selected_district, selected_year, selected_month, min_count, max_count):
-    cutoff = pd.Timestamp(year=selected_year, month=selected_month, day=1)
-
-    # Snapshot for selected district / month
-    snap = _OFF_MONTHLY[
-        (_OFF_MONTHLY['District']           == selected_district) &
-        (_OFF_MONTHLY['month_dt'].dt.year   == selected_year)     &
-        (_OFF_MONTHLY['month_dt'].dt.month  == selected_month)
-    ].copy()
+# ═════════════════════════════════════════════════════════════════════════════
+def _score_offices(district, y, m, min_c, max_c):
+    snap = _OM[(_OM['District'] == district) & (_OM['_y'] == y) & (_OM['_m'] == m)].copy()
     if snap.empty:
         return pd.DataFrame(), 0.0
 
-    district_avg_total = round(snap['Total'].mean(), 2)
+    avg_total = round(snap['Total'].mean(), 2)
 
-    # Apply thresholds
-    if min_count > 0:
-        snap = snap[snap['Total'] >= min_count]
-    if max_count and max_count > 0:
-        snap = snap[snap['Total'] <= max_count]
+    if min_c > 0:
+        snap = snap[snap['Total'] >= min_c]
+    if max_c and max_c > 0:
+        snap = snap[snap['Total'] <= max_c]
     snap = snap.reset_index(drop=True)
     if snap.empty:
-        return pd.DataFrame(), district_avg_total
+        return pd.DataFrame(), avg_total
 
-    valid_offices = snap['Office'].tolist()
+    offices   = snap['Office'].tolist()
+    d_oot     = _dist_oot(district, y, m)
+    s_oot     = _state_oot(y, m)
+    cutoff_ts = pd.Timestamp(year=y, month=m, day=1)
 
-    # Current month district & state OOT
-    dist_oot  = _dist_snap_oot(selected_district, selected_year, selected_month)
-    state_oot = _state_snap_oot(selected_year, selected_month)
+    # F1 / F2 — magnitude
+    snap['F1_Raw'] = snap['OOT_Rate'] - d_oot
+    f1mx = snap['F1_Raw'].abs().max() or 1
+    snap['F1'] = ((snap['F1_Raw'] / f1mx) * 100).clip(-100, 100)
 
-    # ── F1: District OOT magnitude ──────────────────────────────────────────
-    snap['F1_Raw'] = snap['OOT_Rate'] - dist_oot
-    f1_max = snap['F1_Raw'].abs().max() or 1
-    snap['F1']     = ((snap['F1_Raw'] / f1_max) * 100).clip(-100, 100)
+    snap['F2_Raw'] = snap['OOT_Rate'] - s_oot
+    f2mx = snap['F2_Raw'].abs().max() or 1
+    snap['F2'] = ((snap['F2_Raw'] / f2mx) * 100).clip(-100, 100)
 
-    # ── F2: State OOT magnitude ──────────────────────────────────────────────
-    snap['F2_Raw'] = snap['OOT_Rate'] - state_oot
-    f2_max = snap['F2_Raw'].abs().max() or 1
-    snap['F2']     = ((snap['F2_Raw'] / f2_max) * 100).clip(-100, 100)
-
-    # ── F3: Consistency streak ───────────────────────────────────────────────
-    # district monthly avg per month (for bad-month determination)
-    dist_hist_map = _DIST_MONTHLY[
-        (_DIST_MONTHLY['District']  == selected_district) &
-        (_DIST_MONTHLY['month_dt'] <= cutoff)
-    ].set_index('month_dt')['OOT_Rate'].to_dict()
-
-    off_hist = _OFF_MONTHLY[
-        (_OFF_MONTHLY['District']   == selected_district) &
-        (_OFF_MONTHLY['Office'].isin(valid_offices))      &
-        (_OFF_MONTHLY['month_dt']  <= cutoff)
-    ].copy()
-    off_hist['Dist_Avg_Month'] = off_hist['month_dt'].map(dist_hist_map).fillna(0)
-    off_hist['is_bad']         = off_hist['OOT_Rate'] > off_hist['Dist_Avg_Month']
-
-    streaks = {}
-    for office, grp in off_hist.groupby('Office'):
-        flags  = grp.sort_values('month_dt')['is_bad'].tolist()
-        streak = 0
-        for f in reversed(flags):
-            if f: streak += 1
-            else: break
-        streaks[office] = streak
-
+    # F3 — streak
+    streaks = _compute_streaks(district, offices, cutoff_ts)
     snap['Streak'] = snap['Office'].map(streaks).fillna(0).astype(int)
-    snap['F3']     = snap['Streak'].apply(
+    snap['F3'] = snap['Streak'].apply(
         lambda s: 100.0 if s >= 9 else 66.0 if s >= 6 else 33.0 if s >= 3 else 0.0)
 
-    # ── F4: Service concentration (25 = good/distributed, 0 = concentrated) ─
-    svc_snap = _df[
-        (_df['District']          == selected_district) &
-        (_df['Office'].isin(valid_offices))             &
-        (_df['month_dt'].dt.year  == selected_year)     &
-        (_df['month_dt'].dt.month == selected_month)
-    ].groupby(['Office','Service']).agg(OOT=('OOT','sum')).reset_index()
+    # F4 — service concentration (binary)
+    svc_agg = _df[
+        (_df['District'] == district) & (_df['Office'].isin(offices)) &
+        (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
+    ].groupby(['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
 
-    def _top_share(office):
-        sub = svc_snap[svc_snap['Office'] == office]
-        if sub.empty or sub['OOT'].sum() == 0:
-            return 0.0
-        return sub['OOT'].max() / sub['OOT'].sum()
+    off_totals = svc_agg.groupby('Office')['OOT'].transform('sum')
+    svc_agg['_share'] = np.where(off_totals > 0, svc_agg['OOT'] / off_totals, 0)
+    top_shares = svc_agg.groupby('Office')['_share'].max().to_dict()
 
-    snap['Top_Svc_Share'] = snap['Office'].apply(_top_share)
-    # 25 = distributed (no service ≥80%), 0 = concentrated (one service ≥80%)
-    # This means F4=25 is GOOD — so for the penalty score we INVERT:
-    # penalty = 25 - F4_raw  →  concentrated gets higher penalty
-    snap['F4_raw'] = snap['Top_Svc_Share'].apply(
-        lambda sh: 0.0 if sh >= 0.80 else 25.0)
-    # Convert to 0–100 penalty: concentrated = 100, distributed = 0
-    snap['F4'] = snap['Top_Svc_Share'].apply(
-        lambda sh: 100.0 if sh >= 0.80 else 0.0)
+    snap['Top_Svc_Share'] = snap['Office'].map(top_shares).fillna(0)
+    snap['F4'] = np.where(snap['Top_Svc_Share'] >= 0.80, 100.0, 0.0)
 
-    # ── Raw composite (higher = worse) ──────────────────────────────────────
-    raw = (0.25 * snap['F1'] +
-           0.25 * snap['F2'] +
-           0.25 * snap['F3'] +
-           0.25 * snap['F4'])
-
-    raw_min, raw_max = raw.min(), raw.max()
-    if raw_max > raw_min:
-        raw_norm = (raw - raw_min) / (raw_max - raw_min) * 100
+    # Composite
+    raw = 0.25 * snap['F1'] + 0.25 * snap['F2'] + 0.25 * snap['F3'] + 0.25 * snap['F4']
+    rmin, rmax = raw.min(), raw.max()
+    if rmax > rmin:
+        norm = (raw - rmin) / (rmax - rmin) * 100
     else:
-        raw_norm = pd.Series([50.0] * len(raw), index=raw.index)
+        norm = pd.Series(50.0, index=raw.index)
+    snap['Composite_Score'] = (100 - norm).round(2)
+    snap['District_Avg_OOT'] = d_oot
+    snap['State_Avg_OOT']    = s_oot
 
-    snap['Composite_Score']  = (100 - raw_norm).round(2)
-    snap['District_Avg_OOT'] = dist_oot
-    snap['State_Avg_OOT']    = state_oot
-
-    return (
-        snap.sort_values('Composite_Score', ascending=True).reset_index(drop=True),
-        district_avg_total
-    )
+    return snap.sort_values('Composite_Score').reset_index(drop=True), avg_total
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Reason builder
-# ─────────────────────────────────────────────────────────────────────────────
-def _build_reason_items(row):
-    items      = []
-    delta_dist = row['OOT_Rate'] - row['District_Avg_OOT']
-    delta_st   = row['OOT_Rate'] - row['State_Avg_OOT']
-    streak     = int(row['Streak'])
-    top_sh     = row.get('Top_Svc_Share', 0)
-
-    items.append(
-        f"📍 District avg OOT {row['District_Avg_OOT']:.1f}%: "
-        f"{'▲ ' + str(abs(round(delta_dist,1))) + '% above' if delta_dist > 0 else '▼ ' + str(abs(round(delta_dist,1))) + '% below'} district avg."
-    )
-    items.append(
-        f"🌐 State avg OOT {row['State_Avg_OOT']:.1f}%: "
-        f"{'▲ ' + str(abs(round(delta_st,1))) + '% above' if delta_st > 0 else '▼ ' + str(abs(round(delta_st,1))) + '% below'} state avg."
-    )
-    items.append(f"📅 Consistency: {_streak_label(streak)} — {_streak_magnitude(streak)}.")
-    if top_sh >= 0.80:
-        items.append(
-            f"⚠️ Service Concentration: Top service drives {top_sh*100:.1f}% of OOT — "
-            f"F4 penalty applied (office flagged as single-service failure)."
-        )
+# ═════════════════════════════════════════════════════════════════════════════
+# REASON BUILDER
+# ═════════════════════════════════════════════════════════════════════════════
+def _reasons(row):
+    dd = row['OOT_Rate'] - row['District_Avg_OOT']
+    ds = row['OOT_Rate'] - row['State_Avg_OOT']
+    st = int(row['Streak'])
+    ts = row.get('Top_Svc_Share', 0)
+    arrow = lambda v: f"▲ {abs(v):.1f}% above" if v > 0 else f"▼ {abs(v):.1f}% below"
+    items = [
+        f"📍 District OOT {row['District_Avg_OOT']:.1f}%: {arrow(dd)} district avg.",
+        f"🌐 State OOT {row['State_Avg_OOT']:.1f}%: {arrow(ds)} state avg.",
+        f"📅 Consistency: {_streak_label(st)} — {_streak_mag(st)}.",
+    ]
+    if ts >= 0.80:
+        items.append(f"⚠️ Concentrated: top service = {ts*100:.1f}% of OOT → F4 penalty applied.")
     else:
-        items.append(
-            f"✅ Service Distribution OK: Top service = {top_sh*100:.1f}% of OOT "
-            f"(below 80% threshold — no concentration penalty)."
-        )
+        items.append(f"✅ Distributed: top service = {ts*100:.1f}% of OOT (no concentration penalty).")
     return items
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# KPI card
-# ─────────────────────────────────────────────────────────────────────────────
-def _kpi_card(label, value, color="#1a3c5e", bg="#f0f6ff", border="#2d6a9f", tooltip=None):
+# ═════════════════════════════════════════════════════════════════════════════
+# KPI CARD
+# ═════════════════════════════════════════════════════════════════════════════
+def _kpi(label, value, color="#1a3c5e", bg="#f0f6ff", border="#2d6a9f", tip=None):
     return html.Div([
-        html.Div(str(value), style={'fontSize':'1.4rem','fontWeight':'700','color':color}),
-        html.Div(label, style={'fontSize':'0.75rem','color':'#555','fontWeight':'600',
-                               'textTransform':'uppercase','letterSpacing':'0.5px'}),
+        html.Div(str(value), style={'fontSize': '1.4rem', 'fontWeight': '700', 'color': color}),
+        html.Div(label, style={
+            'fontSize': '0.75rem', 'color': '#555', 'fontWeight': '600',
+            'textTransform': 'uppercase', 'letterSpacing': '0.5px'}),
     ], style={
-        'background':bg, 'borderLeft':f'5px solid {border}',
-        'padding':'12px 10px','borderRadius':'8px','textAlign':'center',
-        'cursor':'help' if tooltip else 'default',
-        'title': tooltip or ''
-    })
+        'background': bg, 'borderLeft': f'5px solid {border}',
+        'padding': '12px 10px', 'borderRadius': '8px', 'textAlign': 'center',
+        'cursor': 'help' if tip else 'default', 'title': tip or ''})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sunburst data builder  (District → Office → Service  sized by OOT)
-# ─────────────────────────────────────────────────────────────────────────────
-def _build_sunburst_data(district, year, month):
-    COLORS = ['#FFAE57','#FF7853','#EA5151','#CC3F57','#9A2555']
-
-    snap = _df[
-        (_df['District']          == district) &
-        (_df['month_dt'].dt.year  == year)     &
-        (_df['month_dt'].dt.month == month)
-    ]
-    if snap.empty:
+# ═════════════════════════════════════════════════════════════════════════════
+# SUNBURST (Plotly native — no external JS)
+# ═════════════════════════════════════════════════════════════════════════════
+def _sunburst_figure(district, y, m):
+    raw = _df[
+        (_df['District'] == district) &
+        (_df['month_dt'].dt.year == y) &
+        (_df['month_dt'].dt.month == m)
+    ].groupby(['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
+    raw = raw[raw['OOT'] > 0]
+    if raw.empty:
         return None
 
-    # Office → Service aggregation
-    agg = (snap.groupby(['Office','Service'])
-               .agg(OOT=('OOT','sum'), Total=('Total','sum'))
-               .reset_index())
-    agg = agg[agg['OOT'] > 0]
-    if agg.empty:
-        return None
+    ids, labels, parents, values, clrs = [], [], [], [], []
 
-    offices      = agg['Office'].unique()
-    office_color = {o: COLORS[i % len(COLORS)] for i, o in enumerate(sorted(offices))}
+    # centre node
+    dist_oot = int(raw['OOT'].sum())
+    ids.append(district)
+    labels.append(district)
+    parents.append('')
+    values.append(dist_oot)
+    clrs.append('#2d6a9f')
 
-    children = []
-    for office in sorted(offices):
-        sub     = agg[agg['Office'] == office].sort_values('OOT', ascending=False)
-        off_oot = int(sub['OOT'].sum())
-        svc_nodes = []
-        for _, row in sub.iterrows():
-            svc_nodes.append({
-                'name':      row['Service'],
-                'value':     int(row['OOT']),
-                'itemStyle': {'color': office_color[office], 'opacity': 0.75},
-                'label':     {'color': '#fff'},
-            })
-        children.append({
-            'name':      office,
-            'value':     off_oot,
-            'itemStyle': {'color': office_color[office]},
-            'label':     {'color': '#fff'},
-            'children':  svc_nodes,
-        })
+    offices = sorted(raw['Office'].unique())
+    for idx, office in enumerate(offices):
+        oid = f"{district}/{office}"
+        off_oot = int(raw.loc[raw['Office'] == office, 'OOT'].sum())
+        ids.append(oid)
+        labels.append(office)
+        parents.append(district)
+        values.append(off_oot)
+        clrs.append(SUNBURST_COLORS[idx % len(SUNBURST_COLORS)])
 
-    dist_oot = int(agg['OOT'].sum())
-    data = [{
-        'name':      district,
-        'value':     dist_oot,
-        'itemStyle': {'color': '#2d6a9f'},
-        'label':     {'color': '#fff', 'rotate': 0},
-        'children':  children,
-    }]
-    return data
+        svcs = raw[raw['Office'] == office].sort_values('OOT', ascending=False)
+        for _, sr in svcs.iterrows():
+            sid = f"{oid}/{sr['Service']}"
+            ids.append(sid)
+            labels.append(sr['Service'])
+            parents.append(oid)
+            values.append(int(sr['OOT']))
+            clrs.append(SUNBURST_COLORS[idx % len(SUNBURST_COLORS)])
+
+    fig = go.Figure(go.Sunburst(
+        ids=ids, labels=labels, parents=parents, values=values,
+        branchvalues='total',
+        marker=dict(colors=clrs, line=dict(color=SUNBURST_BG, width=2)),
+        hovertemplate='<b>%{label}</b><br>OOT: %{value:,}<extra></extra>',
+        textinfo='label+value',
+        insidetextorientation='radial',
+        maxdepth=3,
+    ))
+    month_name = MONTH_NAMES.get(m, str(m))
+    fig.update_layout(
+        title=dict(
+            text=f"🌐 OOT Sunburst — {district} | {month_name} {y}",
+            font=dict(color='#ddd', size=16)),
+        paper_bgcolor=SUNBURST_BG,
+        plot_bgcolor=SUNBURST_BG,
+        margin=dict(t=50, l=10, r=10, b=10),
+        height=560,
+        font=dict(color='#eee'),
+    )
+    return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sunburst chart component
-# ─────────────────────────────────────────────────────────────────────────────
-def _sunburst_component(district, year, month):
-    data = _build_sunburst_data(district, year, month)
-    if data is None:
-        return dbc.Alert("No OOT data available for sunburst chart.", color="warning")
-
-    data_json = json.dumps(data)
+# ═════════════════════════════════════════════════════════════════════════════
+# PDF GENERATOR (clean, wrapped text, no overflows)
+# ═════════════════════════════════════════════════════════════════════════════
+def _generate_pdf(year, month, min_c, max_c):
     month_name = MONTH_NAMES.get(month, str(month))
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=1.2*cm, rightMargin=1.2*cm,
+                            topMargin=1.2*cm,  bottomMargin=1.2*cm)
+    sty = getSampleStyleSheet()
 
-    # ECharts sunburst via clientside JS injected in a div
-    chart_id = f"sunburst-{district.replace(' ','_')}-{year}-{month}"
-    return html.Div([
-        html.H5(f"🌐 OOT Sunburst — {district}  |  {month_name} {year}",
-                style={'color':'#1a3c5e','marginBottom':'8px'}),
-        html.P("Centre = District → Ring 2 = Offices → Outer Ring = Services  |  "
-               "Size = Out-of-Time count",
-               style={'fontSize':'0.82rem','color':'#888','marginBottom':'6px'}),
-        html.Div(
-            id=chart_id,
-            **{'data-sunburst': data_json},
-            style={'width':'100%','height':'520px','background':'#2E2733',
-                   'borderRadius':'12px'}
-        ),
-        # Inline script to render ECharts
-        html.Script(f"""
-            (function() {{
-                function tryRender() {{
-                    var el = document.getElementById('{chart_id}');
-                    if (!el) {{ setTimeout(tryRender, 200); return; }}
-                    if (typeof echarts === 'undefined') {{ setTimeout(tryRender, 300); return; }}
-                    var chart = echarts.init(el);
-                    var rawData = {data_json};
-                    var colors  = ['#FFAE57','#FF7853','#EA5151','#CC3F57','#9A2555'];
-                    chart.setOption({{
-                        backgroundColor: '#2E2733',
-                        tooltip: {{
-                            trigger: 'item',
-                            formatter: function(p) {{
-                                return '<b>' + p.name + '</b><br/>OOT: ' + p.value;
-                            }}
-                        }},
-                        series: [{{
-                            type: 'sunburst',
-                            center: ['50%','50%'],
-                            data: rawData,
-                            sort: function(a, b) {{
-                                return b.getValue() - a.getValue();
-                            }},
-                            label: {{
-                                rotate: 'radial',
-                                color: '#fff',
-                                fontSize: 11
-                            }},
-                            itemStyle: {{
-                                borderColor: '#2E2733',
-                                borderWidth: 2
-                            }},
-                            emphasis: {{
-                                focus: 'ancestor'
-                            }},
-                            levels: [
-                                {{}},
-                                {{
-                                    r0: 0, r: 60,
-                                    label: {{ rotate: 0, fontSize: 13, fontWeight: 'bold' }}
-                                }},
-                                {{
-                                    r0: 65, r: 180,
-                                    label: {{ fontSize: 11 }}
-                                }},
-                                {{
-                                    r0: 185, r: 260,
-                                    itemStyle: {{ shadowBlur: 4, shadowColor: '#FFAE57' }},
-                                    label: {{
-                                        rotate: 'tangential',
-                                        fontSize: 9,
-                                        color: '#FFAE57'
-                                    }}
-                                }}
-                            ]
-                        }}]
-                    }});
-                    window.addEventListener('resize', function() {{ chart.resize(); }});
-                }}
-                tryRender();
-            }})();
-        """),
-    ], style={'marginBottom':'20px'})
+    # -- custom styles --
+    sTitle  = ParagraphStyle('sTitle',  parent=sty['Title'],    fontSize=14,
+                             textColor=rl_colors.HexColor('#1a3c5e'), spaceAfter=4)
+    sH2     = ParagraphStyle('sH2',     parent=sty['Heading2'], fontSize=11,
+                             textColor=rl_colors.HexColor('#2d6a9f'), spaceBefore=10, spaceAfter=2)
+    sH3     = ParagraphStyle('sH3',     parent=sty['Heading3'], fontSize=9,
+                             textColor=rl_colors.HexColor('#c0392b'), spaceBefore=6, spaceAfter=2)
+    sBody   = ParagraphStyle('sBody',   parent=sty['Normal'],   fontSize=7.5, spaceAfter=2)
+    sSmall  = ParagraphStyle('sSmall',  parent=sty['Normal'],   fontSize=6.5,
+                             textColor=rl_colors.HexColor('#555'))
+    # cell style: for wrapping inside table cells
+    sCell   = ParagraphStyle('sCell',   parent=sty['Normal'],   fontSize=6.5,
+                             leading=8, alignment=TA_LEFT)
+    sCellC  = ParagraphStyle('sCellC',  parent=sty['Normal'],   fontSize=6.5,
+                             leading=8, alignment=TA_CENTER)
 
+    def _p(txt, style=sCell):
+        return Paragraph(str(txt), style)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PDF Generator
-# ─────────────────────────────────────────────────────────────────────────────
-def _generate_pdf(year, month, min_count, max_count):
-    month_name = MONTH_NAMES.get(month, str(month))
-    buffer     = io.BytesIO()
-    doc        = SimpleDocTemplate(buffer, pagesize=A4,
-                                   leftMargin=1.5*cm, rightMargin=1.5*cm,
-                                   topMargin=1.5*cm,  bottomMargin=1.5*cm)
-    styles     = getSampleStyleSheet()
-    story      = []
+    hdr_style = TableStyle([
+        ('BACKGROUND',     (0, 0), (-1, 0), rl_colors.HexColor('#1a3c5e')),
+        ('TEXTCOLOR',      (0, 0), (-1, 0), rl_colors.white),
+        ('FONTSIZE',       (0, 0), (-1, -1), 6.5),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+         [rl_colors.HexColor('#f0f6ff'), rl_colors.white]),
+        ('GRID',           (0, 0), (-1, -1), 0.4, rl_colors.HexColor('#d0d7de')),
+        ('VALIGN',         (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING',     (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING',  (0, 0), (-1, -1), 2),
+        ('LEFTPADDING',    (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING',   (0, 0), (-1, -1), 3),
+    ])
 
-    title_style = ParagraphStyle('title', parent=styles['Title'],
-                                 fontSize=15, textColor=colors.HexColor('#1a3c5e'), spaceAfter=4)
-    h2_style    = ParagraphStyle('h2', parent=styles['Heading2'],
-                                 fontSize=12, textColor=colors.HexColor('#2d6a9f'),
-                                 spaceBefore=12, spaceAfter=3)
-    h3_style    = ParagraphStyle('h3', parent=styles['Heading3'],
-                                 fontSize=10, textColor=colors.HexColor('#c0392b'),
-                                 spaceBefore=8, spaceAfter=2)
-    body_style  = ParagraphStyle('body', parent=styles['Normal'], fontSize=8, spaceAfter=2)
-    label_style = ParagraphStyle('label', parent=styles['Normal'],
-                                 fontSize=7.5, textColor=colors.HexColor('#555555'))
+    page_w = A4[0] - 2.4 * cm  # usable width
 
-    def _tbl(data, col_widths=None):
-        t = Table(data, colWidths=col_widths, repeatRows=1)
-        t.setStyle(TableStyle([
-            ('BACKGROUND',     (0,0),(-1,0), colors.HexColor('#1a3c5e')),
-            ('TEXTCOLOR',      (0,0),(-1,0), colors.white),
-            ('FONTSIZE',       (0,0),(-1,-1), 7.5),
-            ('ROWBACKGROUNDS', (0,1),(-1,-1),
-             [colors.HexColor('#f0f6ff'), colors.white]),
-            ('GRID',           (0,0),(-1,-1), 0.4, colors.HexColor('#d0d7de')),
-            ('ALIGN',          (1,0),(-1,-1), 'CENTER'),
-            ('VALIGN',         (0,0),(-1,-1), 'MIDDLE'),
-            ('TOPPADDING',     (0,0),(-1,-1), 2),
-            ('BOTTOMPADDING',  (0,0),(-1,-1), 2),
-        ]))
+    def _make_tbl(data, col_widths):
+        t = RLTable(data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(hdr_style)
         return t
 
-    story.append(Paragraph(f"Monthly Performance Report — {month_name} {year}", title_style))
+    story = []
+    story.append(Paragraph(f"Monthly Performance Report — {month_name} {year}", sTitle))
     story.append(Paragraph(
-        f"All districts  |  Min: {min_count}  |  Max: {max_count or 'None'}  |  "
-        f"Score: 100=best, 0=worst  |  District & State OOT = current month snapshot",
-        body_style))
+        f"All districts | Min: {min_c} | Max: {max_c or 'None'} | "
+        f"Score: 100=best, 0=worst", sBody))
     story.append(HRFlowable(width="100%", thickness=1,
-                             color=colors.HexColor('#2d6a9f'), spaceAfter=8))
+                             color=rl_colors.HexColor('#2d6a9f'), spaceAfter=6))
     story.append(Paragraph(
-        "Formula: Score = 100 − norm(0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4)  |  "
-        "F1=District OOT magnitude  |  F2=State OOT magnitude  |  "
-        "F3=Streak penalty  |  F4=100 if top service ≥80% OOT else 0",
-        label_style))
-    story.append(Spacer(1, 8))
+        "<b>Formula:</b> Score = 100 − norm(0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4) | "
+        "F1=District OOT diff | F2=State OOT diff | F3=Streak penalty | "
+        "F4=100 if top service ≥80% OOT else 0", sSmall))
+    story.append(Spacer(1, 6))
 
-    state_svc_avg = _state_service_avg(year, month)
-    districts     = sorted(_df['District'].dropna().unique())
+    svc_avg = _state_svc_avg(year, month)
+    districts = sorted(_df['District'].dropna().unique())
+
+    # column widths for office summary table
+    off_cw = [3.8*cm, 1.2*cm, 1*cm, 1.1*cm, 1.3*cm, 1.3*cm,
+              1.1*cm, 1.1*cm, 1.5*cm, 1.5*cm, 1.2*cm]
+    # column widths for service table (service name gets more space)
+    svc_cw = [4*cm, 1.1*cm, 1*cm, 1*cm, 1.2*cm, 1.2*cm, 1.1*cm, 2.5*cm, 2.8*cm]
 
     for district in districts:
-        scored, dist_avg_total = _score_offices(district, year, month, min_count, max_count)
+        scored, avg_t = _score_offices(district, year, month, min_c, max_c)
         if scored.empty:
             continue
 
-        dist_oot  = scored['District_Avg_OOT'].iloc[0]
-        state_oot = scored['State_Avg_OOT'].iloc[0]
+        d_oot = scored['District_Avg_OOT'].iloc[0]
+        s_oot = scored['State_Avg_OOT'].iloc[0]
 
-        story.append(Paragraph(f"District: {district}", h2_style))
-        story.append(HRFlowable(width="100%", thickness=0.5,
-                                 color=colors.HexColor('#aaaaaa'), spaceAfter=3))
+        story.append(Paragraph(f"District: {district}", sH2))
+        story.append(HRFlowable(width="100%", thickness=0.4,
+                                 color=rl_colors.HexColor('#aaa'), spaceAfter=2))
         story.append(Paragraph(
-            f"District OOT: <b>{dist_oot:.1f}%</b>  |  "
-            f"State OOT: <b>{state_oot:.1f}%</b>  |  "
-            f"Avg Total: <b>{dist_avg_total:,.0f}</b>  |  "
-            f"Offices: <b>{len(scored)}</b>", body_style))
+            f"District OOT: <b>{d_oot:.1f}%</b> | State OOT: <b>{s_oot:.1f}%</b> | "
+            f"Avg Total: <b>{avg_t:,.0f}</b> | Offices: <b>{len(scored)}</b>", sBody))
+        story.append(Spacer(1, 3))
+
+        # ---------- top-level district table ----------
+        off_data = [[
+            _p('<b>Office</b>'), _p('<b>Total</b>', sCellC), _p('<b>OOT</b>', sCellC),
+            _p('<b>OOT%</b>', sCellC), _p('<b>Dist%</b>', sCellC),
+            _p('<b>State%</b>', sCellC), _p('<b>vs Dist</b>', sCellC),
+            _p('<b>vs State</b>', sCellC), _p('<b>Streak</b>', sCellC),
+            _p('<b>TopSvc%</b>', sCellC), _p('<b>Score</b>', sCellC),
+        ]]
+        for _, r in scored.iterrows():
+            dd = r['OOT_Rate'] - r['District_Avg_OOT']
+            ds = r['OOT_Rate'] - r['State_Avg_OOT']
+            off_data.append([
+                _p(r['Office']),
+                _p(f"{int(r['Total']):,}", sCellC),
+                _p(f"{int(r['OOT']):,}", sCellC),
+                _p(f"{r['OOT_Rate']:.1f}%", sCellC),
+                _p(f"{r['District_Avg_OOT']:.1f}%", sCellC),
+                _p(f"{r['State_Avg_OOT']:.1f}%", sCellC),
+                _p(f"{'▲' if dd > 0 else '▼'}{abs(dd):.1f}%", sCellC),
+                _p(f"{'▲' if ds > 0 else '▼'}{abs(ds):.1f}%", sCellC),
+                _p(str(int(r['Streak'])), sCellC),
+                _p(f"{r['Top_Svc_Share']*100:.1f}%", sCellC),
+                _p(f"{r['Composite_Score']:.1f}", sCellC),
+            ])
+        story.append(_make_tbl(off_data, off_cw))
         story.append(Spacer(1, 4))
 
-        worst3 = scored.head(3)
+        # ---------- worst 3 detail ----------
+        worst3 = scored.head(min(3, len(scored)))
         for rank, (_, row) in enumerate(worst3.iterrows(), 1):
             streak = int(row['Streak'])
-            delta_d = row['OOT_Rate'] - row['District_Avg_OOT']
-            delta_s = row['OOT_Rate'] - row['State_Avg_OOT']
-            top_sh  = row.get('Top_Svc_Share', 0)
+            ts     = row.get('Top_Svc_Share', 0)
+            dd     = row['OOT_Rate'] - row['District_Avg_OOT']
+            ds     = row['OOT_Rate'] - row['State_Avg_OOT']
 
-            story.append(Paragraph(f"Rank {rank} Worst — {row['Office']}", h3_style))
-            off_data = [
-                ['Metric',                  'Value'],
-                ['Total Applications',       f"{int(row['Total']):,}"],
-                ['Out-of-Time (OOT)',        f"{int(row['OOT']):,}"],
-                ['Office OOT Rate',          f"{row['OOT_Rate']:.1f}%"],
-                ['District OOT (month)',      f"{row['District_Avg_OOT']:.1f}%"],
-                ['State OOT (month)',         f"{row['State_Avg_OOT']:.1f}%"],
-                ['vs District',              f"{'▲' if delta_d>0 else '▼'} {abs(delta_d):.1f}%"],
-                ['vs State',                 f"{'▲' if delta_s>0 else '▼'} {abs(delta_s):.1f}%"],
-                ['Consecutive Bad Months',   f"{streak}"],
-                ['Streak Magnitude',         _streak_magnitude(streak)],
-                ['Top Service OOT Share',    f"{top_sh*100:.1f}%"],
-                ['F4 Concentration',         'Penalised' if top_sh >= 0.80 else 'OK (distributed)'],
-                ['Composite Score (100=best)', f"{row['Composite_Score']:.1f}"],
+            story.append(Paragraph(f"Rank {rank} Worst — {row['Office']}", sH3))
+
+            # Office metrics
+            met = [
+                ['Metric', 'Value'],
+                ['Total',                   f"{int(row['Total']):,}"],
+                ['OOT',                     f"{int(row['OOT']):,}"],
+                ['OOT Rate',                f"{row['OOT_Rate']:.1f}%"],
+                ['District OOT',            f"{row['District_Avg_OOT']:.1f}%"],
+                ['State OOT',               f"{row['State_Avg_OOT']:.1f}%"],
+                ['vs District',             f"{'▲' if dd>0 else '▼'} {abs(dd):.1f}%"],
+                ['vs State',                f"{'▲' if ds>0 else '▼'} {abs(ds):.1f}%"],
+                ['Bad-Month Streak',        str(streak)],
+                ['Streak Level',            _streak_mag(streak)],
+                ['Top Svc OOT Share',       f"{ts*100:.1f}%"],
+                ['Concentration',           'Penalised' if ts >= 0.80 else 'OK (distributed)'],
+                ['Composite Score',         f"{row['Composite_Score']:.1f}"],
             ]
-            story.append(_tbl(off_data, col_widths=[8*cm, 7*cm]))
-            story.append(Spacer(1, 4))
+            met_para = [[_p(c[0]), _p(c[1], sCellC)] for c in met]
+            story.append(_make_tbl(met_para, [6*cm, 5*cm]))
+            story.append(Spacer(1, 3))
 
-            snap_svc = _df[
-                (_df['District']          == district) &
-                (_df['Office']            == row['Office']) &
-                (_df['month_dt'].dt.year  == year) &
-                (_df['month_dt'].dt.month == month)
-            ].groupby('Service').agg(Total=('Total','sum'), OOT=('OOT','sum')).reset_index()
-            snap_svc['OOT_Rate']      = snap_svc.apply(lambda r: _oot_rate(r['OOT'], r['Total']), axis=1)
-            snap_svc['State_Svc_Avg'] = snap_svc['Service'].map(lambda s: state_svc_avg.get(s, 0.0))
-            snap_svc['vs_State']      = snap_svc['OOT_Rate'] - snap_svc['State_Svc_Avg']
-            total_oot_off             = snap_svc['OOT'].sum()
-            snap_svc['OOT_Share']     = snap_svc['OOT'].apply(
-                lambda o: round(o/total_oot_off*100,1) if total_oot_off > 0 else 0)
+            # Service breakdown
+            svc_raw = _df[
+                (_df['District'] == district) & (_df['Office'] == row['Office']) &
+                (_df['month_dt'].dt.year == year) & (_df['month_dt'].dt.month == month)
+            ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+            svc_raw['OOT_Rate'] = svc_raw.apply(lambda r: _oot_rate(r['OOT'], r['Total']), axis=1)
+            svc_raw['StAvg']    = svc_raw['Service'].map(lambda s: svc_avg.get(s, 0.0))
+            svc_raw['vs']       = svc_raw['OOT_Rate'] - svc_raw['StAvg']
+            t_oot               = svc_raw['OOT'].sum()
+            svc_raw['Share']    = svc_raw['OOT'].apply(
+                lambda o: round(o / t_oot * 100, 1) if t_oot > 0 else 0)
             svc_streaks = _service_consistency(row['Office'], year, month)
+            svc_raw = svc_raw.sort_values('OOT_Rate', ascending=False)
 
-            svc_rows = [['Service','Total','OOT','OOT%','State Avg%','vs State','OOT Share','Streak','Magnitude']]
-            for _, sr in snap_svc.sort_values('OOT_Rate', ascending=False).iterrows():
+            svc_data = [[
+                _p('<b>Service</b>'), _p('<b>Total</b>', sCellC), _p('<b>OOT</b>', sCellC),
+                _p('<b>OOT%</b>', sCellC), _p('<b>St.Avg%</b>', sCellC),
+                _p('<b>vs St</b>', sCellC), _p('<b>Share%</b>', sCellC),
+                _p('<b>Streak</b>', sCellC), _p('<b>Level</b>', sCellC),
+            ]]
+            for _, sr in svc_raw.iterrows():
                 st = svc_streaks.get(sr['Service'], 0)
-                svc_rows.append([
-                    sr['Service'],
-                    f"{int(sr['Total']):,}",
-                    f"{int(sr['OOT']):,}",
-                    f"{sr['OOT_Rate']:.1f}%",
-                    f"{sr['State_Svc_Avg']:.1f}%",
-                    f"{'▲' if sr['vs_State']>0 else '▼'} {abs(sr['vs_State']):.1f}%",
-                    f"{sr['OOT_Share']:.1f}%",
-                    _streak_label(st),
-                    _streak_magnitude(st),
+                svc_data.append([
+                    _p(sr['Service']),  # wraps automatically
+                    _p(f"{int(sr['Total']):,}", sCellC),
+                    _p(f"{int(sr['OOT']):,}", sCellC),
+                    _p(f"{sr['OOT_Rate']:.1f}%", sCellC),
+                    _p(f"{sr['StAvg']:.1f}%", sCellC),
+                    _p(f"{'▲' if sr['vs']>0 else '▼'}{abs(sr['vs']):.1f}%", sCellC),
+                    _p(f"{sr['Share']:.1f}%", sCellC),
+                    _p(_streak_label(st), sCellC),
+                    _p(_streak_mag(st), sCellC),
                 ])
-            story.append(Paragraph("Service Breakdown:", label_style))
-            story.append(_tbl(svc_rows,
-                               col_widths=[3.5*cm,1.3*cm,1.1*cm,1.2*cm,
-                                           1.7*cm,1.4*cm,1.4*cm,2.8*cm,3*cm]))
-            story.append(Spacer(1, 8))
-        story.append(Spacer(1, 10))
+            story.append(Paragraph("Service Breakdown:", sSmall))
+            story.append(KeepTogether([_make_tbl(svc_data, svc_cw)]))
+            story.append(Spacer(1, 6))
+
+        story.append(Spacer(1, 8))
 
     doc.build(story)
-    buffer.seek(0)
-    return buffer.read()
+    buf.seek(0)
+    return buf.read()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Layout
-# ─────────────────────────────────────────────────────────────────────────────
-districts = sorted(_df['District'].dropna().unique()) if not _df.empty else []
-years     = sorted(_df['month_dt'].dt.year.unique())  if not _df.empty else []
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYOUT
+# ═════════════════════════════════════════════════════════════════════════════
+_districts = sorted(_df['District'].dropna().unique()) if len(_df) else []
+_years     = sorted(_df['month_dt'].dt.year.unique())  if len(_df) else []
 
 layout = html.Div([
-    # ECharts CDN
-    html.Script(src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"),
-
     html.Div([
         html.H2("🔍 Advanced Analytics & Performance Report",
-                style={'color':'white','margin':'0','fontSize':'1.6rem','letterSpacing':'1px'}),
-        html.P("Composite score: 100 = best, 0 = worst  |  "
-               "District & State OOT = selected month snapshot",
-               style={'color':'#c8dff0','margin':'4px 0 0 0','fontSize':'0.9rem'}),
-    ], style={
-        'background':'linear-gradient(90deg,#1a3c5e 0%,#2d6a9f 100%)',
-        'padding':'18px 28px','borderRadius':'10px','marginBottom':'20px'
-    }),
+                style={'color': 'white', 'margin': '0', 'fontSize': '1.6rem'}),
+        html.P("Score: 100 = best, 0 = worst  |  Click District OOT KPI for sunburst",
+               style={'color': '#c8dff0', 'margin': '4px 0 0 0', 'fontSize': '0.9rem'}),
+    ], style={'background': 'linear-gradient(90deg,#1a3c5e,#2d6a9f)',
+              'padding': '18px 28px', 'borderRadius': '10px', 'marginBottom': '20px'}),
 
     dbc.Row([
         dbc.Col([html.Label("🏛️ District"),
                  dcc.Dropdown(id='aa-district',
-                              options=[{'label':d,'value':d} for d in districts],
-                              value=districts[0] if districts else None,
+                              options=[{'label': d, 'value': d} for d in _districts],
+                              value=_districts[0] if _districts else None,
                               clearable=False)], md=3),
         dbc.Col([html.Label("📅 Year"),
                  dcc.Dropdown(id='aa-year',
-                              options=[{'label':y,'value':y} for y in years],
-                              value=years[-1] if years else None,
+                              options=[{'label': y, 'value': y} for y in _years],
+                              value=_years[-1] if _years else None,
                               clearable=False)], md=1),
         dbc.Col([html.Label("🗓️ Month"),
                  dcc.Dropdown(id='aa-month', clearable=False)], md=2),
         dbc.Col([html.Label("⚙️ Min Total"),
                  dcc.Input(id='aa-min-count', type='number', value=100, min=0,
-                           style={'width':'100%','padding':'6px',
-                                  'borderRadius':'4px','border':'1px solid #ccc'})], md=1),
+                           style={'width': '100%', 'padding': '6px',
+                                  'borderRadius': '4px', 'border': '1px solid #ccc'})], md=1),
         dbc.Col([html.Label("⚙️ Max Total"),
                  dcc.Input(id='aa-max-count', type='number', value=None, min=0,
                            placeholder='No limit',
-                           style={'width':'100%','padding':'6px',
-                                  'borderRadius':'4px','border':'1px solid #ccc'})], md=1),
+                           style={'width': '100%', 'padding': '6px',
+                                  'borderRadius': '4px', 'border': '1px solid #ccc'})], md=1),
         dbc.Col([
             html.Br(),
             dbc.Row([
                 dbc.Col(dbc.Button("🔍 Analyse", id='aa-run-btn',
-                                   color='primary', style={'width':'100%'}), width=6),
-                dbc.Col(dbc.Button("📄 Monthly Report PDF", id='aa-pdf-btn',
-                                   color='warning',
-                                   style={'width':'100%','fontSize':'0.75rem'}), width=6),
+                                   color='primary', style={'width': '100%'}), width=6),
+                dbc.Col(dbc.Button("📄 PDF Report", id='aa-pdf-btn', color='warning',
+                                   style={'width': '100%', 'fontSize': '0.75rem'}), width=6),
             ])
         ], md=4),
     ], className='mb-4'),
@@ -722,426 +640,370 @@ layout = html.Div([
     dcc.Download(id='aa-pdf-file'),
     html.Div(id='aa-output'),
 
-], style={'padding':'20px'})
+    # Hidden sunburst modal
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("🌐 OOT Sunburst — District → Office → Service"),
+                        close_button=True),
+        dbc.ModalBody(id='aa-sunburst-body'),
+    ], id='aa-sunburst-modal', size='xl', is_open=False),
+
+], style={'padding': '20px'})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callbacks
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# CALLBACKS
+# ═════════════════════════════════════════════════════════════════════════════
+
+# -- Month dropdown --
 @app.callback(
-    Output('aa-month','options'),
-    Output('aa-month','value'),
-    Input('aa-district','value'),
-    Input('aa-year',    'value'),
+    Output('aa-month', 'options'),
+    Output('aa-month', 'value'),
+    Input('aa-district', 'value'),
+    Input('aa-year', 'value'),
 )
 def update_months(district, year):
     if not district or not year or _df.empty:
         return [], None
-    filtered = _df[(_df['District']==district) & (_df['month_dt'].dt.year==year)]
-    months   = sorted(filtered['month_dt'].dt.month.unique())
-    opts     = [{'label':MONTH_NAMES[m],'value':m} for m in months]
-    return opts, (months[-1] if months else None)
+    months = sorted(
+        _OM[(_OM['District'] == district) & (_OM['_y'] == int(year))]['_m'].unique())
+    opts = [{'label': MONTH_NAMES.get(m, str(m)), 'value': m} for m in months]
+    return opts, months[-1] if months else None
 
 
+# -- PDF --
 @app.callback(
-    Output('aa-pdf-file',     'data'),
+    Output('aa-pdf-file', 'data'),
     Output('aa-pdf-download', 'children'),
-    Input('aa-pdf-btn',   'n_clicks'),
-    State('aa-year',      'value'),
-    State('aa-month',     'value'),
-    State('aa-min-count', 'value'),
-    State('aa-max-count', 'value'),
+    Input('aa-pdf-btn', 'n_clicks'),
+    State('aa-year', 'value'), State('aa-month', 'value'),
+    State('aa-min-count', 'value'), State('aa-max-count', 'value'),
     prevent_initial_call=True,
 )
-def generate_pdf(n_clicks, year, month, min_count, max_count):
+def gen_pdf(_, year, month, min_c, max_c):
     if not year or not month:
-        return None, dbc.Alert("Please select Year and Month first.", color="warning")
+        return None, dbc.Alert("Select Year & Month.", color="warning")
     try:
-        pdf_bytes  = _generate_pdf(int(year), int(month),
-                                   int(min_count or 0),
-                                   int(max_count) if max_count else None)
-        b64        = base64.b64encode(pdf_bytes).decode()
-        month_name = MONTH_NAMES.get(int(month), str(month))
-        filename   = f"Monthly_Report_{month_name}_{year}.pdf"
-        return (
-            dict(content=b64, filename=filename, base64=True, type='application/pdf'),
-            dbc.Alert(f"✅ PDF ready: {filename}", color="success", duration=4000)
-        )
+        pdf = _generate_pdf(int(year), int(month),
+                            int(min_c or 0), int(max_c) if max_c else None)
+        mn  = MONTH_NAMES.get(int(month), str(month))
+        fn  = f"Report_{mn}_{year}.pdf"
+        return dict(content=base64.b64encode(pdf).decode(),
+                    filename=fn, base64=True, type='application/pdf'), \
+               dbc.Alert(f"✅ {fn}", color="success", duration=4000)
     except Exception as e:
-        return None, dbc.Alert(f"❌ PDF generation failed: {e}", color="danger")
+        return None, dbc.Alert(f"❌ {e}", color="danger")
 
 
+# -- Sunburst modal (opens on District OOT KPI click) --
 @app.callback(
-    Output('aa-output','children'),
-    Input('aa-run-btn',   'n_clicks'),
-    State('aa-district',  'value'),
-    State('aa-year',      'value'),
-    State('aa-month',     'value'),
-    State('aa-min-count', 'value'),
+    Output('aa-sunburst-modal', 'is_open'),
+    Output('aa-sunburst-body', 'children'),
+    Input('aa-dist-oot-kpi', 'n_clicks'),
+    State('aa-district', 'value'),
+    State('aa-year', 'value'), State('aa-month', 'value'),
+    prevent_initial_call=True,
+)
+def open_sunburst(n, district, year, month):
+    if not all([district, year, month]):
+        return False, ""
+    fig = _sunburst_figure(district, int(year), int(month))
+    if fig is None:
+        return True, dbc.Alert("No OOT data for this selection.", color="warning")
+    return True, dcc.Graph(figure=fig, style={'height': '560px'})
+
+
+# -- Main analysis --
+@app.callback(
+    Output('aa-output', 'children'),
+    Input('aa-run-btn', 'n_clicks'),
+    State('aa-district', 'value'), State('aa-year', 'value'),
+    State('aa-month', 'value'), State('aa-min-count', 'value'),
     State('aa-max-count', 'value'),
     prevent_initial_call=True,
 )
-def run_analysis(n_clicks, district, year, month, min_count, max_count):
+def run_analysis(_, district, year, month, min_c, max_c):
     if not all([district, year, month]):
-        return dbc.Alert("Please select all filters.", color="warning")
+        return dbc.Alert("Select all filters.", color="warning")
 
-    min_count = int(min_count or 0)
-    max_count = int(max_count) if max_count else None
+    min_c = int(min_c or 0)
+    max_c = int(max_c) if max_c else None
     year, month = int(year), int(month)
 
-    scored, district_avg_total = _score_offices(
-        district, year, month, min_count, max_count)
-
+    scored, avg_t = _score_offices(district, year, month, min_c, max_c)
     if scored.empty:
-        return dbc.Alert(
-            f"No offices found within Total [{min_count} – {max_count or '∞'}].",
-            color="warning")
+        return dbc.Alert(f"No offices in Total [{min_c}–{max_c or '∞'}].", color="warning")
 
-    dist_oot   = scored['District_Avg_OOT'].iloc[0]
-    state_oot  = scored['State_Avg_OOT'].iloc[0]
+    d_oot      = scored['District_Avg_OOT'].iloc[0]
+    s_oot      = scored['State_Avg_OOT'].iloc[0]
     month_name = MONTH_NAMES.get(month, str(month))
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
+    # ── KPI row (District OOT is clickable → opens sunburst) ──────────────
     kpi_row = dbc.Row([
-        dbc.Col(_kpi_card("Offices Analysed",   str(len(scored))), md=2),
-        dbc.Col(_kpi_card("Avg Total (pre-filter)",
-                          f"{district_avg_total:,.0f}",
-                          color="#1a3c5e",bg="#eaf4ff",border="#2d6a9f"), md=2),
-        dbc.Col(_kpi_card("District OOT",
-                          f"{dist_oot:.1f}%",
-                          color="#c0392b",bg="#fff5f5",border="#e74c3c"), md=2),
-        dbc.Col(_kpi_card("State OOT",
-                          f"{state_oot:.1f}%",
-                          color="#7d3c98",bg="#fdf5ff",border="#9b59b6"), md=2),
-        dbc.Col(_kpi_card("Flagged ≥3 Bad Months",
-                          str(int((scored['Streak']>=3).sum())),
-                          color="#e67e22",bg="#fff8f0",border="#e67e22"), md=2),
-        dbc.Col(_kpi_card("Single-Svc Concentrated",
-                          str(int((scored['Top_Svc_Share']>=0.80).sum())),
-                          color="#c0392b",bg="#fff5f5",border="#e74c3c"), md=2),
+        dbc.Col(_kpi("Offices", str(len(scored))), md=2),
+        dbc.Col(_kpi("Avg Total (pre-filter)", f"{avg_t:,.0f}",
+                      color="#1a3c5e", bg="#eaf4ff", border="#2d6a9f"), md=2),
+        dbc.Col(
+            html.Div(
+                _kpi("District OOT  🔍click",
+                     f"{d_oot:.1f}%",
+                     color="#c0392b", bg="#fff5f5", border="#e74c3c",
+                     tip="Click to open sunburst: District → Office → Service by OOT"),
+                id='aa-dist-oot-kpi',
+                style={'cursor': 'pointer'},
+                n_clicks=0,
+            ), md=2),
+        dbc.Col(_kpi("State OOT",    f"{s_oot:.1f}%",
+                      color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=2),
+        dbc.Col(_kpi("≥3 Bad Months", str(int((scored['Streak'] >= 3).sum())),
+                      color="#e67e22", bg="#fff8f0", border="#e67e22"), md=2),
+        dbc.Col(_kpi("Concentrated", str(int((scored['Top_Svc_Share'] >= 0.80).sum())),
+                      color="#c0392b", bg="#fff5f5", border="#e74c3c",
+                      tip="Offices where one service ≥80% of total OOT"), md=2),
     ], className='mb-3')
 
-    threshold_banner = dbc.Alert([
-        html.Strong(f"📊 {district}  |  {month_name} {year}"),
-        html.Br(),
-        f"Pre-filter avg total: ", html.Strong(f"{district_avg_total:,.1f}"),
-        f"  |  Filter: Total ∈ [{min_count}, {max_count or '∞'}]",
+    info = dbc.Alert([
+        html.Strong(f"📊 {district} | {month_name} {year}"), html.Br(),
+        f"Pre-filter avg total: ", html.Strong(f"{avg_t:,.1f}"),
+        f" | Filter: [{min_c}, {max_c or '∞'}]",
     ], color="info", className="mb-3")
 
-    # Formula banner
-    formula_banner = dbc.Alert([
-        html.Strong("📐 Composite Score Formula  "),
-        html.Code("Score = 100 − norm( 0.25·F1 + 0.25·F2 + 0.25·F3 + 0.25·F4 )",
-                  style={'fontSize':'0.85rem'}),
-        html.Br(),
+    formula = dbc.Alert([
+        html.Strong("📐 Formula  "),
+        html.Code("Score = 100 − norm(0.25·F1+0.25·F2+0.25·F3+0.25·F4)"), html.Br(),
         html.Small([
-            html.B("F1"), " Office OOT% vs District OOT% (current month magnitude)  |  ",
-            html.B("F2"), " Office OOT% vs State OOT% (current month magnitude)  |  ",
-            html.B("F3"), " Streak penalty (≥9→100, ≥6→66, ≥3→33, else 0)  |  ",
-            html.B("F4"), " Concentration: 100 if one service ≥80% of OOT, else 0  |  ",
-            html.B("norm"), " = rescale to 0–100 across offices  |  ",
-            html.B("100 = best, 0 = worst"),
-        ], style={'color':'#555','fontSize':'0.82rem'})
-    ], color="light", className="mb-3", style={'border':'1px solid #d0d7de'})
+            html.B("F1"), " |OOT%−Dist%| magnitude  |  ",
+            html.B("F2"), " |OOT%−State%| magnitude  |  ",
+            html.B("F3"), " Streak (≥9→100, ≥6→66, ≥3→33, 0)  |  ",
+            html.B("F4"), " 100 if top svc≥80% OOT else 0  |  ",
+            html.B("100=best"),
+        ], style={'color': '#555', 'fontSize': '0.82rem'})
+    ], color="light", className="mb-3", style={'border': '1px solid #d0d7de'})
 
-    # ── Office table ──────────────────────────────────────────────────────────
-    disp = scored[['Office','Total','OOT','OOT_Rate',
-                   'District_Avg_OOT','State_Avg_OOT',
-                   'Streak','Top_Svc_Share','Composite_Score']].copy()
-    disp['Top_Svc_Share'] = (disp['Top_Svc_Share']*100).round(1)
-    disp = disp.rename(columns={
-        'OOT':              'Out of Time',
-        'OOT_Rate':         'OOT Rate (%)',
-        'District_Avg_OOT': 'District OOT (%)',
-        'State_Avg_OOT':    'State OOT (%)',
-        'Streak':           'Bad-Month Streak ⓘ',
-        'Top_Svc_Share':    'Top Svc OOT Share (%)',
-        'Composite_Score':  'Score(100=best) ⓘ',
-    })
-    table_section = html.Div([
-        html.H4(f"📊 Office Performance — {month_name} {year}  |  {district}",
-                className='mb-1'),
-        html.Small("Sorted worst→best. Hover ⓘ headers for explanation.",
-                   style={'color':'#888'}),
+    # ── Table ─────────────────────────────────────────────────────────────
+    disp = scored[['Office', 'Total', 'OOT', 'OOT_Rate',
+                   'District_Avg_OOT', 'State_Avg_OOT',
+                   'Streak', 'Top_Svc_Share', 'Composite_Score']].copy()
+    disp['Top_Svc_Share'] = (disp['Top_Svc_Share'] * 100).round(1)
+    disp.rename(columns={
+        'OOT': 'Out of Time', 'OOT_Rate': 'OOT Rate(%)',
+        'District_Avg_OOT': 'District OOT(%)',
+        'State_Avg_OOT': 'State OOT(%)',
+        'Streak': 'Bad-Month Streak ⓘ',
+        'Top_Svc_Share': 'Top Svc OOT Share(%)',
+        'Composite_Score': 'Score(100=best) ⓘ',
+    }, inplace=True)
+
+    table_sec = html.Div([
+        html.H4(f"📊 Office Performance — {month_name} {year} | {district}", className='mb-1'),
+        html.Small([
+            "Sorted worst→best.  ",
+            html.Span("ⓘ Bad-Month Streak", style={'cursor': 'help', 'textDecoration': 'underline dotted',
+                                                     'color': '#e67e22'},
+                      title=STREAK_TOOLTIP),
+            "  |  ",
+            html.Span("ⓘ Composite Score", style={'cursor': 'help', 'textDecoration': 'underline dotted',
+                                                    'color': '#2d6a9f'},
+                      title=COMPOSITE_TOOLTIP),
+        ], style={'color': '#888'}),
         dbc.Table.from_dataframe(disp.round(2), striped=True, bordered=True,
                                  hover=True, responsive=True, size='sm')
     ], className='mb-4')
 
-    # ── Bar chart ─────────────────────────────────────────────────────────────
+    # ── Bar chart ─────────────────────────────────────────────────────────
     fig = px.bar(
         scored.sort_values('Composite_Score'),
         x='Office', y='OOT_Rate', color='Composite_Score',
-        color_continuous_scale='RdYlGn', range_color=[0,100],
-        title=f"OOT Rate by Office — {month_name} {year}  |  {district}",
-        labels={'OOT_Rate':'% Out of Time','Composite_Score':'Score (100=best)'},
-        text='OOT_Rate',
-    )
-    fig.add_hline(y=dist_oot, line_dash='dash', line_color='#2980b9',
-                  annotation_text=f"District OOT: {dist_oot:.1f}%",
-                  annotation_position="top left")
-    fig.add_hline(y=state_oot, line_dash='dot', line_color='#8e44ad',
-                  annotation_text=f"State OOT: {state_oot:.1f}%",
-                  annotation_position="bottom right")
+        color_continuous_scale='RdYlGn', range_color=[0, 100],
+        title=f"OOT Rate by Office — {month_name} {year} | {district}",
+        labels={'OOT_Rate': '% Out of Time', 'Composite_Score': 'Score'},
+        text='OOT_Rate')
+    fig.add_hline(y=d_oot, line_dash='dash', line_color='#2980b9',
+                  annotation_text=f"District: {d_oot:.1f}%", annotation_position="top left")
+    fig.add_hline(y=s_oot, line_dash='dot', line_color='#8e44ad',
+                  annotation_text=f"State: {s_oot:.1f}%", annotation_position="bottom right")
     fig.update_layout(xaxis_tickangle=-45, height=460)
     fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-    chart_section = dcc.Graph(figure=fig, className='mb-4')
+    chart_sec = dcc.Graph(figure=fig, className='mb-4')
 
-    # ── Sunburst ──────────────────────────────────────────────────────────────
-    sunburst_section = html.Div([
-        html.Hr(),
-        _sunburst_component(district, year, month),
-        html.Hr(),
-    ], className='mb-4')
-
-    # ── Worst 3 ───────────────────────────────────────────────────────────────
-    worst_labels = ["🥇 Rank 1 — Worst","🥈 Rank 2","🥉 Rank 3"]
-    worst_items  = []
-    for rank, (_, row) in enumerate(scored.head(min(3,len(scored))).iterrows(), 1):
-        reasons = _build_reason_items(row)
+    # ── Worst 3 ───────────────────────────────────────────────────────────
+    def _rank_card(row, rank, wlabel, header_bg, header_clr, streak_bg, streak_border):
+        reasons = _reasons(row)
         office  = row['Office']
         streak  = int(row['Streak'])
-        top_sh  = row.get('Top_Svc_Share', 0)
-
-        worst_items.append(dbc.Card([
+        ts      = row.get('Top_Svc_Share', 0)
+        return dbc.Card([
             dbc.CardHeader(html.Strong(
-                f"{worst_labels[rank-1]}  |  {office}  |  "
-                f"OOT: {row['OOT_Rate']:.1f}%  |  Score: {row['Composite_Score']:.1f}/100"
-            ), style={'background':'#fff0f0','color':'#c0392b'}),
+                f"{wlabel} | {office} | OOT: {row['OOT_Rate']:.1f}% | "
+                f"Score: {row['Composite_Score']:.1f}/100"),
+                style={'background': header_bg, 'color': header_clr}),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(_kpi_card("Total",         f"{int(row['Total']):,}",
-                                      color="#1a3c5e",bg="#eaf4ff",border="#2d6a9f"), md=2),
-                    dbc.Col(_kpi_card("OOT Rate",      f"{row['OOT_Rate']:.1f}%",
-                                      color="#c0392b",bg="#fff5f5",border="#e74c3c"), md=2),
-                    dbc.Col(_kpi_card("District OOT",  f"{row['District_Avg_OOT']:.1f}%",
-                                      color="#2471a3",bg="#eaf4ff",border="#3498db"), md=2),
-                    dbc.Col(_kpi_card("State OOT",     f"{row['State_Avg_OOT']:.1f}%",
-                                      color="#7d3c98",bg="#fdf5ff",border="#9b59b6"), md=2),
-                    dbc.Col(
-                        html.Div([
-                            html.Div(_streak_label(streak),
-                                     style={'fontSize':'1rem','fontWeight':'700','color':'#e67e22'}),
-                            html.Div("Bad-Month Streak",
-                                     style={'fontSize':'0.72rem','color':'#555',
-                                            'fontWeight':'600','textTransform':'uppercase'}),
-                            html.Div(_streak_magnitude(streak),
-                                     style={'fontSize':'0.72rem','color':'#888'}),
-                        ], style={'background':'#fff8f0','borderLeft':'5px solid #e67e22',
-                                  'padding':'10px','borderRadius':'8px','textAlign':'center',
-                                  'title':STREAK_TOOLTIP,'cursor':'help'}),
-                    md=2),
-                    dbc.Col(_kpi_card(
-                        "Top Svc OOT Share",
-                        f"{top_sh*100:.1f}%",
-                        color="#e74c3c" if top_sh>=0.80 else "#27ae60",
-                        bg="#fff5f5"    if top_sh>=0.80 else "#f0fff4",
-                        border="#e74c3c" if top_sh>=0.80 else "#27ae60",
-                        tooltip="% of this office's total OOT coming from top service. "
-                                "≥80% triggers F4 concentration penalty."
-                    ), md=2),
+                    dbc.Col(_kpi("Total", f"{int(row['Total']):,}",
+                                 color="#1a3c5e", bg="#eaf4ff", border="#2d6a9f"), md=2),
+                    dbc.Col(_kpi("OOT Rate", f"{row['OOT_Rate']:.1f}%",
+                                 color=header_clr, bg=header_bg,
+                                 border=header_clr.replace('#fff','#e74')), md=2),
+                    dbc.Col(_kpi("Dist OOT", f"{row['District_Avg_OOT']:.1f}%",
+                                 color="#2471a3", bg="#eaf4ff", border="#3498db"), md=2),
+                    dbc.Col(_kpi("State OOT", f"{row['State_Avg_OOT']:.1f}%",
+                                 color="#7d3c98", bg="#fdf5ff", border="#9b59b6"), md=2),
+                    dbc.Col(html.Div([
+                        html.Div(_streak_label(streak),
+                                 style={'fontSize': '1rem', 'fontWeight': '700', 'color': streak_border}),
+                        html.Div("Bad-Month Streak",
+                                 style={'fontSize': '0.72rem', 'color': '#555',
+                                        'fontWeight': '600', 'textTransform': 'uppercase'}),
+                        html.Div(_streak_mag(streak),
+                                 style={'fontSize': '0.72rem', 'color': '#888'}),
+                    ], style={'background': streak_bg, 'borderLeft': f'5px solid {streak_border}',
+                              'padding': '10px', 'borderRadius': '8px', 'textAlign': 'center',
+                              'title': STREAK_TOOLTIP, 'cursor': 'help'}), md=2),
+                    dbc.Col(_kpi("Top Svc Share", f"{ts*100:.1f}%",
+                                 color="#e74c3c" if ts >= 0.80 else "#27ae60",
+                                 bg="#fff5f5" if ts >= 0.80 else "#f0fff4",
+                                 border="#e74c3c" if ts >= 0.80 else "#27ae60",
+                                 tip="≥80% → F4 concentration penalty"), md=2),
                 ], className='mb-2'),
-                html.Strong("📝 Reason for Flagging:"),
+                html.Strong("📝 Reason:"),
                 html.Ul([html.Li(r) for r in reasons]),
                 dbc.Button("🔎 Service Breakdown",
-                           id={'type':'aa-detail-btn','index':office},
+                           id={'type': 'aa-detail-btn', 'index': office},
                            color='outline-danger', size='sm', className='mt-2'),
                 dbc.Collapse(
-                    html.Div(id={'type':'aa-detail-panel','index':office}),
-                    id={'type':'aa-detail-collapse','index':office},
-                    is_open=False
-                )
+                    html.Div(id={'type': 'aa-detail-panel', 'index': office}),
+                    id={'type': 'aa-detail-collapse', 'index': office}, is_open=False),
             ])
-        ], className='mb-3'))
+        ], className='mb-3')
 
-    worst_section = html.Div([
+    labels_w = ["🥇 Rank 1 — Worst", "🥈 Rank 2", "🥉 Rank 3"]
+    worst_cards = [
+        _rank_card(row, i, labels_w[i], '#fff0f0', '#c0392b', '#fff8f0', '#e67e22')
+        for i, (_, row) in enumerate(scored.head(min(3, len(scored))).iterrows())
+    ]
+    worst_sec = html.Div([
         html.Div([
-            html.H3("⚠️ Worst Performing Offices",
-                    style={'margin':'0','color':'#c0392b'}),
-            html.P("Sorted lowest composite score first. "
-                   "Score = 100−norm(0.25·F1+0.25·F2+0.25·F3+0.25·F4)",
-                   style={'margin':'4px 0 0 0','color':'#7f8c8d','fontSize':'0.88rem'}),
-        ], style={'background':'#fff0f0','border':'1.5px solid #e74c3c',
-                  'borderRadius':'10px','padding':'14px 22px','marginBottom':'12px'}),
-        *worst_items
+            html.H3("⚠️ Worst Performing Offices", style={'margin': '0', 'color': '#c0392b'}),
+            html.P("Lowest composite score first.", style={'margin': '4px 0', 'color': '#7f8c8d', 'fontSize': '0.88rem'}),
+        ], style={'background': '#fff0f0', 'border': '1.5px solid #e74c3c',
+                  'borderRadius': '10px', 'padding': '14px 22px', 'marginBottom': '12px'}),
+        *worst_cards
     ], className='mb-4')
 
-    # ── Best 3 ────────────────────────────────────────────────────────────────
-    best_labels = ["🥇 Best","🥈 2nd Best","🥉 3rd Best"]
-    best_items  = []
-    best_rows   = scored.tail(min(3,len(scored))).iloc[::-1].reset_index(drop=True)
-    for rank,(_, row) in enumerate(best_rows.iterrows(), 1):
-        reasons = _build_reason_items(row)
-        streak  = int(row['Streak'])
-        top_sh  = row.get('Top_Svc_Share',0)
-        best_items.append(dbc.Card([
-            dbc.CardHeader(html.Strong(
-                f"{best_labels[rank-1]}  |  {row['Office']}  |  "
-                f"OOT: {row['OOT_Rate']:.1f}%  |  Score: {row['Composite_Score']:.1f}/100"
-            ), style={'background':'#f0fff4','color':'#1e8449'}),
-            dbc.CardBody([
-                dbc.Row([
-                    dbc.Col(_kpi_card("Total",        f"{int(row['Total']):,}",
-                                      color="#1a3c5e",bg="#eaf4ff",border="#2d6a9f"), md=2),
-                    dbc.Col(_kpi_card("OOT Rate",     f"{row['OOT_Rate']:.1f}%",
-                                      color="#1e8449",bg="#f0fff4",border="#27ae60"), md=2),
-                    dbc.Col(_kpi_card("District OOT", f"{row['District_Avg_OOT']:.1f}%",
-                                      color="#2471a3",bg="#eaf4ff",border="#3498db"), md=2),
-                    dbc.Col(_kpi_card("State OOT",    f"{row['State_Avg_OOT']:.1f}%",
-                                      color="#7d3c98",bg="#fdf5ff",border="#9b59b6"), md=2),
-                    dbc.Col(
-                        html.Div([
-                            html.Div(_streak_label(streak),
-                                     style={'fontSize':'1rem','fontWeight':'700','color':'#27ae60'}),
-                            html.Div("Bad-Month Streak",
-                                     style={'fontSize':'0.72rem','color':'#555',
-                                            'fontWeight':'600','textTransform':'uppercase'}),
-                            html.Div(_streak_magnitude(streak),
-                                     style={'fontSize':'0.72rem','color':'#888'}),
-                        ], style={'background':'#f0fff4','borderLeft':'5px solid #27ae60',
-                                  'padding':'10px','borderRadius':'8px','textAlign':'center',
-                                  'title':STREAK_TOOLTIP,'cursor':'help'}),
-                    md=2),
-                    dbc.Col(_kpi_card(
-                        "Top Svc OOT Share", f"{top_sh*100:.1f}%",
-                        color="#e74c3c" if top_sh>=0.80 else "#27ae60",
-                        bg="#fff5f5"    if top_sh>=0.80 else "#f0fff4",
-                        border="#e74c3c" if top_sh>=0.80 else "#27ae60"), md=2),
-                ], className='mb-2'),
-                html.Strong("📝 Performance Summary:"),
-                html.Ul([html.Li(r) for r in reasons])
-            ])
-        ], className='mb-3'))
-
-    best_section = html.Div([
+    # ── Best 3 ────────────────────────────────────────────────────────────
+    labels_b = ["🥇 Best", "🥈 2nd Best", "🥉 3rd Best"]
+    best_rows = scored.tail(min(3, len(scored))).iloc[::-1].reset_index(drop=True)
+    best_cards = [
+        _rank_card(row, i, labels_b[i], '#f0fff4', '#1e8449', '#f0fff4', '#27ae60')
+        for i, (_, row) in enumerate(best_rows.iterrows())
+    ]
+    best_sec = html.Div([
         html.Div([
-            html.H3("🏆 Best Performing Offices",
-                    style={'margin':'0','color':'#1e8449'}),
-            html.P("Highest composite score = lowest OOT burden relative to benchmarks",
-                   style={'margin':'4px 0 0 0','color':'#7f8c8d','fontSize':'0.88rem'}),
-        ], style={'background':'#f0fff4','border':'1.5px solid #27ae60',
-                  'borderRadius':'10px','padding':'14px 22px','marginBottom':'12px'}),
-        *best_items
+            html.H3("🏆 Best Performing Offices", style={'margin': '0', 'color': '#1e8449'}),
+            html.P("Highest composite score.", style={'margin': '4px 0', 'color': '#7f8c8d', 'fontSize': '0.88rem'}),
+        ], style={'background': '#f0fff4', 'border': '1.5px solid #27ae60',
+                  'borderRadius': '10px', 'padding': '14px 22px', 'marginBottom': '12px'}),
+        *best_cards
     ], className='mb-4')
 
-    disclaimer = html.Div([
+    note = html.Div([
         html.Strong("ℹ️ Methodology: "),
-        f"Filter Total ∈ [{min_count},{max_count or '∞'}]. "
-        f"F1/F2 = magnitude of office OOT vs district/state snapshot (current month). "
-        f"F4 = 100 penalty if top service ≥80% of office OOT, else 0 (distributed = no penalty). "
-        f"Raw normalised 0–100 across offices then inverted. 100=best."
-    ], style={'background':'#f8f9fa','border':'1px solid #d0d7de',
-              'borderRadius':'8px','padding':'12px 18px','color':'#555','fontSize':'0.82rem'})
+        f"Filter Total∈[{min_c},{max_c or '∞'}]. "
+        f"F1/F2 = magnitude of office OOT vs district/state snapshot. "
+        f"F4 = 100 if top service ≥80% of OOT else 0. "
+        f"Normalised 0–100 then inverted. 100=best."
+    ], style={'background': '#f8f9fa', 'border': '1px solid #d0d7de',
+              'borderRadius': '8px', 'padding': '12px 18px', 'color': '#555', 'fontSize': '0.82rem'})
 
-    return html.Div([
-        kpi_row, threshold_banner, formula_banner,
-        table_section, chart_section, sunburst_section,
-        worst_section, best_section, disclaimer
-    ])
+    return html.Div([kpi_row, info, formula, table_sec, chart_sec,
+                     worst_sec, best_sec, note])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Service detail panel callback
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SERVICE DETAIL (expand/collapse)
+# ═════════════════════════════════════════════════════════════════════════════
 @app.callback(
-    Output({'type':'aa-detail-collapse','index':ALL},'is_open'),
-    Output({'type':'aa-detail-panel',   'index':ALL},'children'),
-    Input({'type':'aa-detail-btn',      'index':ALL},'n_clicks'),
-    State({'type':'aa-detail-collapse', 'index':ALL},'is_open'),
-    State('aa-district','value'),
-    State('aa-year',    'value'),
-    State('aa-month',   'value'),
+    Output({'type': 'aa-detail-collapse', 'index': ALL}, 'is_open'),
+    Output({'type': 'aa-detail-panel',    'index': ALL}, 'children'),
+    Input({'type':  'aa-detail-btn',      'index': ALL}, 'n_clicks'),
+    State({'type':  'aa-detail-collapse', 'index': ALL}, 'is_open'),
+    State('aa-district', 'value'),
+    State('aa-year', 'value'), State('aa-month', 'value'),
     prevent_initial_call=True,
 )
-def toggle_detail(n_clicks_list, is_open_list, district, year, month):
+def toggle_detail(n_list, is_open_list, district, year, month):
     if not callback_context.triggered_id:
-        return is_open_list, [dash.no_update]*len(is_open_list)
+        return is_open_list, [dash.no_update] * len(is_open_list)
 
-    office     = callback_context.triggered_id['index']
-    year, month = int(year), int(month)
-    all_ids    = [t['id']['index'] for t in callback_context.inputs_list[0]]
-    target_idx = all_ids.index(office)
+    office = callback_context.triggered_id['index']
+    y, m   = int(year), int(month)
+    all_ids = [t['id']['index'] for t in callback_context.inputs_list[0]]
+    idx     = all_ids.index(office)
 
-    new_open             = list(is_open_list)
-    new_open[target_idx] = not is_open_list[target_idx]
-    panels               = [dash.no_update]*len(is_open_list)
+    new_open      = list(is_open_list)
+    new_open[idx] = not is_open_list[idx]
+    panels        = [dash.no_update] * len(is_open_list)
 
-    if not new_open[target_idx]:
+    if not new_open[idx]:
         return new_open, panels
 
-    state_svc_avg = _state_service_avg(year, month)
-
+    svc_avg = _state_svc_avg(y, m)
     snap = _df[
-        (_df['District']          == district) &
-        (_df['Office']            == office)   &
-        (_df['month_dt'].dt.year  == year)     &
-        (_df['month_dt'].dt.month == month)
-    ]
-    svc_snap = (
-        snap.groupby('Service')
-        .agg(Total=('Total','sum'), OOT=('OOT','sum'))
-        .reset_index()
-    )
-    svc_snap['OOT_Rate']      = svc_snap.apply(lambda r: _oot_rate(r['OOT'],r['Total']), axis=1)
-    svc_snap['State_Svc_Avg'] = svc_snap['Service'].map(lambda s: state_svc_avg.get(s,0.0))
-    svc_snap['vs_State']      = svc_snap['OOT_Rate'] - svc_snap['State_Svc_Avg']
-    total_oot                 = svc_snap['OOT'].sum()
-    svc_snap['OOT_Share']     = svc_snap['OOT'].apply(
-        lambda o: round(o/total_oot*100,1) if total_oot>0 else 0.0)
-    svc_snap                  = svc_snap.sort_values('OOT_Rate', ascending=False)
-    svc_streaks               = _service_consistency(office, year, month)
+        (_df['District'] == district) & (_df['Office'] == office) &
+        (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
+    ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+
+    snap['OOT_Rate'] = snap.apply(lambda r: _oot_rate(r['OOT'], r['Total']), axis=1)
+    snap['StAvg']    = snap['Service'].map(lambda s: svc_avg.get(s, 0.0))
+    snap['vs']       = snap['OOT_Rate'] - snap['StAvg']
+    t_oot            = snap['OOT'].sum()
+    snap['Share']    = snap['OOT'].apply(lambda o: round(o / t_oot * 100, 1) if t_oot > 0 else 0)
+    snap.sort_values('OOT_Rate', ascending=False, inplace=True)
+    svc_str = _service_consistency(office, y, m)
 
     rows = []
-    for _, sr in svc_snap.iterrows():
-        st      = svc_streaks.get(sr['Service'], 0)
-        is_bad  = sr['vs_State'] > 0
-        domina  = sr['OOT_Share'] >= 80
-        bg      = '#fff5f5' if (is_bad or domina) else '#f0fff4'
+    for _, sr in snap.iterrows():
+        st    = svc_str.get(sr['Service'], 0)
+        bad   = sr['vs'] > 0
+        conc  = sr['Share'] >= 80
+        bg    = '#fff5f5' if (bad or conc) else '#f0fff4'
         rows.append(html.Tr([
-            html.Td(sr['Service'],              style={'fontWeight':'600'}),
-            html.Td(f"{int(sr['Total']):,}",    style={'textAlign':'center'}),
-            html.Td(f"{int(sr['OOT']):,}",      style={'textAlign':'center'}),
-            html.Td(f"{sr['OOT_Rate']:.1f}%",   style={'textAlign':'center',
-                                                         'color':'#c0392b' if is_bad else '#1e8449',
-                                                         'fontWeight':'700'}),
-            html.Td(f"{sr['State_Svc_Avg']:.1f}%", style={'textAlign':'center'}),
-            html.Td(f"{'▲' if is_bad else '▼'} {abs(sr['vs_State']):.1f}%",
-                    style={'textAlign':'center',
-                           'color':'#c0392b' if is_bad else '#1e8449','fontWeight':'600'}),
-            html.Td(f"{sr['OOT_Share']:.1f}%",
-                    style={'textAlign':'center',
-                           'color':'#e74c3c' if domina else '#555',
-                           'fontWeight':'700' if domina else '400'}),
-            html.Td(_streak_label(st),          style={'textAlign':'center'}),
-            html.Td(_streak_magnitude(st),      style={'textAlign':'center',
-                                                         'fontSize':'0.78rem','color':'#555'}),
-        ], style={'background':bg}))
+            html.Td(sr['Service'], style={'fontWeight': '600'}),
+            html.Td(f"{int(sr['Total']):,}",   style={'textAlign': 'center'}),
+            html.Td(f"{int(sr['OOT']):,}",     style={'textAlign': 'center'}),
+            html.Td(f"{sr['OOT_Rate']:.1f}%",  style={'textAlign': 'center',
+                     'color': '#c0392b' if bad else '#1e8449', 'fontWeight': '700'}),
+            html.Td(f"{sr['StAvg']:.1f}%",     style={'textAlign': 'center'}),
+            html.Td(f"{'▲' if bad else '▼'} {abs(sr['vs']):.1f}%",
+                    style={'textAlign': 'center', 'color': '#c0392b' if bad else '#1e8449',
+                           'fontWeight': '600'}),
+            html.Td(f"{sr['Share']:.1f}%",     style={'textAlign': 'center',
+                     'color': '#e74c3c' if conc else '#555',
+                     'fontWeight': '700' if conc else '400'}),
+            html.Td(_streak_label(st),         style={'textAlign': 'center'}),
+            html.Td(_streak_mag(st),           style={'textAlign': 'center',
+                     'fontSize': '0.78rem', 'color': '#555'}),
+        ], style={'background': bg}))
 
-    detail_table = html.Div([
+    panels[idx] = html.Div([
         html.H5(f"📋 Service Breakdown — {office}",
-                style={'color':'#1a3c5e','marginTop':'14px','marginBottom':'6px'}),
-        html.P(
-            "OOT% vs state-wide average for each service.  "
-            "OOT Share = % of office total OOT from that service "
-            "(red if ≥80% — triggers F4 concentration penalty).  "
-            "Streak = consecutive months office OOT for this service > state service avg.",
-            style={'fontSize':'0.82rem','color':'#666','marginBottom':'6px'}
-        ),
+                style={'color': '#1a3c5e', 'marginTop': '14px', 'marginBottom': '6px'}),
+        html.P("OOT% vs state service avg. Share=% of office OOT. "
+               "Red if ≥80% (F4 penalty). Streak = months office svc > state svc avg.",
+               style={'fontSize': '0.82rem', 'color': '#666', 'marginBottom': '6px'}),
         dbc.Table([
             html.Thead(html.Tr([
-                html.Th("Service"),
-                html.Th("Total",         style={'textAlign':'center'}),
-                html.Th("OOT",           style={'textAlign':'center'}),
-                html.Th("OOT Rate",      style={'textAlign':'center'}),
-                html.Th("State Svc Avg", style={'textAlign':'center'}),
-                html.Th("vs State",      style={'textAlign':'center'}),
-                html.Th("OOT Share",     style={'textAlign':'center'}),
-                html.Th("Streak",        style={'textAlign':'center'}),
-                html.Th("Magnitude",     style={'textAlign':'center'}),
-            ]), style={'background':'#1a3c5e','color':'white'}),
+                html.Th("Service"), html.Th("Total", style={'textAlign': 'center'}),
+                html.Th("OOT", style={'textAlign': 'center'}),
+                html.Th("OOT Rate", style={'textAlign': 'center'}),
+                html.Th("State Avg", style={'textAlign': 'center'}),
+                html.Th("vs State", style={'textAlign': 'center'}),
+                html.Th("OOT Share", style={'textAlign': 'center'}),
+                html.Th("Streak", style={'textAlign': 'center'}),
+                html.Th("Level", style={'textAlign': 'center'}),
+            ]), style={'background': '#1a3c5e', 'color': 'white'}),
             html.Tbody(rows)
         ], bordered=True, hover=True, responsive=True, size='sm')
-    ], style={'padding':'10px','background':'#fafafa',
-              'border':'1px solid #ddd','borderRadius':'8px'})
+    ], style={'padding': '10px', 'background': '#fafafa',
+              'border': '1px solid #ddd', 'borderRadius': '8px'})
 
-    panels[target_idx] = detail_table
     return new_open, panels
