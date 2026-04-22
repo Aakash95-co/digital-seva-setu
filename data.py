@@ -19,7 +19,7 @@ def _load_tt(filename):
             d[col] = 0
     for col in ["Disposed_Out", "Disposed", "Received", "Total", "Pending"]:
         d[col] = pd.to_numeric(d[col], errors="coerce").fillna(0)
-    d["Late_Disposed_%"] = (d["Disposed_Out"] / d["Disposed"].replace(0, pd.NA) * 100).fillna(0)
+    d["Late_Disposed_%"] = (d["Disposed_Out"] / d["Disposed"].replace(0, pd.NA) * 100).fillna(0).infer_objects(copy=False)
     return d
 
 def _load_mt(filename):

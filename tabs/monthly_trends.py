@@ -93,7 +93,7 @@ def toggle_entity_selectors(mode):
 
 @app.callback([Output('single-entity-dropdown', 'options'), Output('entity1-dropdown', 'options'),
                Output('entity2-dropdown', 'options')],
-              [Input('primary-level', 'value'), Input('month-dropdown', 'value')]
+              [Input('primary-level', 'value'), Input('month-dropdown', 'value'), Input('fy-store', 'data')]
               )
 def update_entity_options(primary_level, selected_months, fy):
     df_mt = FY_DATA[fy]['df_mt']
@@ -132,13 +132,14 @@ def reset_drill_levels_on_primary_change(_): return []
                State('drilldown-district-dropdown', 'value')]
               )
 def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, single_entity, entity1, entity2,
+                                 fy,   # ← add this
                                  current_service, current_office, current_district):
     hide = {'display': 'none'}
     if not months: return (dash.no_update,) * 9
     df_mt_light = FY_DATA[fy]['df_mt_light']
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
-
+    df_base = df_mt_light[df_mt_light['Month_Year'].isin(months)]   # ← add this missing line
     if mode == 'single' and single_entity:
         df_base = df_base[df_base[primary_col] == single_entity]
     elif mode == 'comparison' and entity1 and entity2:
@@ -193,10 +194,11 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
                Input('entity2-dropdown', 'value'),
                Input('drill-down-levels', 'value'), Input('drilldown-service-dropdown', 'value'),
                Input('drilldown-office-dropdown', 'value'), Input('drilldown-district-dropdown', 'value')],
-              [State('primary-level', 'value')]
+              [State('primary-level', 'value'), State('fy-store', 'data')]   # ← fy as State
               )
 def update_dashboard(mode, months, single_entity, entity1, entity2, drill_levels, service_filter, office_filter,
-                     district_filter, primary_level):
+                     district_filter, primary_level, fy):   # ← add fy
+    df_mt = FY_DATA[fy]['df_mt']   # ← add this as first line
     if not months: return dbc.Alert("Please select a time period.", color="warning"), None, None, None
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
