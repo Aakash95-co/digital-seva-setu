@@ -127,19 +127,20 @@ def reset_drill_levels_on_primary_change(_): return []
                Output('drilldown-district-dropdown', 'style')],
               [Input('drill-down-levels', 'value'), Input('primary-level', 'value'), Input('month-dropdown', 'value'),
                Input('analysis-mode-selector', 'value'), Input('single-entity-dropdown', 'value'),
-               Input('entity1-dropdown', 'value'), Input('entity2-dropdown', 'value')],
+               Input('entity1-dropdown', 'value'), Input('entity2-dropdown', 'value'),
+               Input('fy-store', 'data')],
               [State('drilldown-service-dropdown', 'value'), State('drilldown-office-dropdown', 'value'),
                State('drilldown-district-dropdown', 'value')]
               )
 def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, single_entity, entity1, entity2,
-                                 fy,   # ← add this
+                                 fy,
                                  current_service, current_office, current_district):
     hide = {'display': 'none'}
     if not months: return (dash.no_update,) * 9
     df_mt_light = FY_DATA[fy]['df_mt_light']
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
-    df_base = df_mt_light[df_mt_light['Month_Year'].isin(months)]   # ← add this missing line
+    df_base = df_mt_light[df_mt_light['Month_Year'].isin(months)]
     if mode == 'single' and single_entity:
         df_base = df_base[df_base[primary_col] == single_entity]
     elif mode == 'comparison' and entity1 and entity2:
