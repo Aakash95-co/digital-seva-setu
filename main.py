@@ -1,7 +1,7 @@
 import dash
 from dash import dcc, html, Input, Output
 from app import app
-from tabs import metadata, monthly_trends, tabular, treemap, advanced_analytics
+from tabs import metadata, monthly_trends, tabular, treemap, advanced_analytics, findings, oot_drilldown
 
 app.layout = html.Div([
     html.H1("📊 Performance Analytics Dashboard", style={'textAlign': 'center', 'marginBottom': '20px'}),
@@ -30,6 +30,8 @@ app.layout = html.Div([
         dcc.Tab(label="📋 Tabular Data", value="table-tab", children=[tabular.layout]),
         dcc.Tab(label="📈 Treemap View", value="treemap-tab", children=[treemap.layout]),
         dcc.Tab(label="🧠 Advanced Analytics and Report", value="advanced-analytics-tab", children=[advanced_analytics.layout]),
+        dcc.Tab(label="🔍 Findings", value="findings-tab", children=[findings.layout]),          # ← add
+        dcc.Tab(label="📌 OOT Drilldown", value="oot-drilldown-tab", children=[oot_drilldown.layout]),  # ← add
     ])
 ])
 
