@@ -3,10 +3,9 @@ from dash import dcc, html, dash_table, Input, Output, State
 from dash.dash_table.Format import Format
 import pandas as pd
 from app import app
-from data import df_tt, initial_summary_tt, get_district_summary, categorize
-
+from data import FY_DATA, initial_summary_tt, get_district_summary, categorize
 layout = html.Div([
-    html.H3("📋 Summary Table (Financial Year 2024-2025)"),
+    html.H3(id='tabular-title', children="📋 Summary Table (Financial Year 2024-2025)"),
     dcc.Download(id="download-summary-table"),
     html.Div([
         html.Button("Download Excel", id="btn-download-summary-table",
@@ -34,29 +33,33 @@ layout = html.Div([
 
 @app.callback(
     Output("summary-table", "data"),
+    Output("tabular-title", "children"),   # ← new output
     Input("summary-table", "active_cell"),
     Input("district-filter", "value"),
     Input("office-filter", "value"),
+    Input("fy-store", "data"),             # ← new input
     State("summary-table", "data"),
 )
-def update_summary_table(active_cell, selected_districts, selected_offices, current_data):
+def update_summary_table(active_cell, selected_districts, selected_offices, fy, current_data):
+    df_tt = FY_DATA[fy]['df_tt']
+    title = f"📋 Summary Table ({FY_DATA[fy]['label']})"
     filtered_df = df_tt.copy()
     if selected_districts: filtered_df = filtered_df[filtered_df["District_Eng"].isin(selected_districts)]
     if selected_offices: filtered_df = filtered_df[filtered_df["Office_Eng"].isin(selected_offices)]
 
     base_summary = get_district_summary(filtered_df)
-    if not active_cell or current_data is None: return base_summary.to_dict("records")
+    if not active_cell or current_data is None: return base_summary.to_dict("records"), title
 
     current = list(current_data)
     row_idx = active_cell["row"]
-    if row_idx >= len(current): return base_summary.to_dict("records")
+    if row_idx >= len(current): return base_summary.to_dict("records"), title
     clicked_row = current[row_idx]
 
     def is_child_of(row, parent):
         return (row["District_Eng"] == parent["District_Eng"] and (parent["Office_Eng"] == "" or row["Office_Eng"] == parent["Office_Eng"]) and (parent["Service_Eng"] == "" or row["Service_Eng"] == parent["Service_Eng"]) and row != parent)
 
     children =[r for r in current if is_child_of(r, clicked_row)]
-    if children: return [r for r in current if r not in children]
+    if children: return [r for r in current if r not in children], title
 
     if clicked_row["Office_Eng"] == "" and clicked_row["Service_Eng"] == "":
         d = clicked_row["District_Eng"]
@@ -73,7 +76,7 @@ def update_summary_table(active_cell, selected_districts, selected_offices, curr
         services["Category"] = services["Late_Disposed_%"].apply(categorize)
         for i, r in enumerate(services.to_dict("records")): current.insert(row_idx + 1 + i, r)
 
-    return current
+    return current, title
 
 @app.callback(
     Output("download-summary-table", "data"),

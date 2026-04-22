@@ -5,8 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from app import app
-from data import df_mt, df_mt_light, all_months, month_options, COLOR_PALETTE
-
+from data import FY_DATA, all_months_2425, month_options_2425, COLOR_PALETTE
 layout = dbc.Container([
     dbc.Row(dbc.Col(html.H1("Service Performance Analytics Dashboard", className="text-center text-primary my-4"))),
     dbc.Card(dbc.CardBody([
@@ -22,8 +21,8 @@ layout = dbc.Container([
             ], md=6),
             dbc.Col([
                 html.Label("2. Select Time Period", className="fw-bold"),
-                dcc.Dropdown(id='month-dropdown', options=month_options, value=[all_months[-1]] if all_months else [],
-                             multi=True)
+                dcc.Dropdown(id='month-dropdown', options=month_options_2425,
+             value=[all_months_2425[-1]] if all_months_2425 else [], multi=True)
             ], md=6)
         ], className="mb-3"),
         html.Hr(),
@@ -96,7 +95,8 @@ def toggle_entity_selectors(mode):
                Output('entity2-dropdown', 'options')],
               [Input('primary-level', 'value'), Input('month-dropdown', 'value')]
               )
-def update_entity_options(primary_level, selected_months):
+def update_entity_options(primary_level, selected_months, fy):
+    df_mt = FY_DATA[fy]['df_mt']
     if not selected_months: return [], [], []
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     entities = sorted(df_mt[df_mt['Month_Year'].isin(selected_months)][col_map[primary_level]].unique())
@@ -135,9 +135,9 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
                                  current_service, current_office, current_district):
     hide = {'display': 'none'}
     if not months: return (dash.no_update,) * 9
+    df_mt_light = FY_DATA[fy]['df_mt_light']
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
-    df_base = df_mt_light[df_mt_light['Month_Year'].isin(months)]
 
     if mode == 'single' and single_entity:
         df_base = df_base[df_base[primary_col] == single_entity]
@@ -162,23 +162,9 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
             opts.append({'label': f"{v} ({int(c):,})" if include_counts else v, 'value': v})
         return opts
 
-    df_svc = df_base.copy()
-    if specific_office: df_svc = df_svc[df_svc['Office_name'] == current_office]
-    if specific_district: df_svc = df_svc[df_svc['District_name'] == current_district]
-    service_opts = build_opts(oot_counts_sorted(df_svc, 'Service_name'), 'Service',
-                              (specific_office or specific_district) and show_service)
-
-    df_off = df_base.copy()
-    if specific_service: df_off = df_off[df_off['Service_name'] == current_service]
-    if specific_district: df_off = df_off[df_off['District_name'] == current_district]
-    office_opts = build_opts(oot_counts_sorted(df_off, 'Office_name'), 'Office',
-                             (specific_service or specific_district) and show_office)
-
-    df_dist = df_base.copy()
-    if specific_service: df_dist = df_dist[df_dist['Service_name'] == current_service]
-    if specific_office: df_dist = df_dist[df_dist['Office_name'] == current_office]
-    district_opts = build_opts(oot_counts_sorted(df_dist, 'District_name'), 'District',
-                               (specific_service or specific_office) and show_district)
+    service_opts = build_opts(oot_counts_sorted(df_base, 'Service_name'), 'Service')
+    office_opts = build_opts(oot_counts_sorted(df_base, 'Office_name'), 'Office')
+    district_opts = build_opts(oot_counts_sorted(df_base, 'District_name'), 'District')
 
     trigger_ids = [t['prop_id'].split('.')[0] for t in dash.callback_context.triggered]
     reset = any(t in ('primary-level', 'month-dropdown', 'analysis-mode-selector') for t in trigger_ids)
@@ -186,9 +172,9 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
     def resolve(val, valid):
         return val if val and (val in set(valid) or str(val).startswith('ALL_')) else None
 
-    svc_val = None if reset else resolve(current_service, oot_counts_sorted(df_svc, 'Service_name').index)
-    off_val = None if reset else resolve(current_office, oot_counts_sorted(df_off, 'Office_name').index)
-    dist_val = None if reset else resolve(current_district, oot_counts_sorted(df_dist, 'District_name').index)
+    svc_val = None if reset else resolve(current_service, oot_counts_sorted(df_base, 'Service_name').index)
+    off_val = None if reset else resolve(current_office, oot_counts_sorted(df_base, 'Office_name').index)
+    dist_val = None if reset else resolve(current_district, oot_counts_sorted(df_base, 'District_name').index)
 
     return (
         service_opts if show_service else dash.no_update,

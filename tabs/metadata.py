@@ -1,46 +1,70 @@
-import streamlit as st
 import pandas as pd
-from dash import html, dcc
+from dash import html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 from app import app
-from data import df
+from data import FY_DATA
+
+def get_top10_table(df, group_col, value_col):
+    agg_df = df.groupby(group_col)[value_col].sum().reset_index()
+    agg_df = agg_df.sort_values(by=value_col, ascending=False).head(10)
+    total_val = agg_df[value_col].sum() if agg_df[value_col].sum() > 0 else 1
+    agg_df['Percentage'] = (agg_df[value_col] / total_val * 100).round(2).astype(str) + '%'
+    display_name = group_col.replace('_Eng', '').capitalize()
+    agg_df.rename(columns={group_col: display_name, value_col: 'Count'}, inplace=True)
+    return agg_df
+
+def create_dash_table(title, dataframe):
+    return html.Div([
+        html.H5(title, style={'marginTop': '20px', 'color': '#2d6a9f', 'fontSize': '16px'}),
+        dbc.Table.from_dataframe(dataframe, striped=True, bordered=True, hover=True, size="sm")
+    ])
 
 layout = html.Div([
     html.H2("📋 Dataset Overview & Metadata", style={
         'background': 'linear-gradient(90deg, #1a3c5e 0%, #2d6a9f 100%)',
         'color': 'white', 'padding': '18px 28px', 'borderRadius': '10px', 'marginBottom': '20px'
     }),
-    dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H5("Total Records"),
-            html.H3(f"{len(df):,}")
-        ])), md=2),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H5("Total Columns"),
-            html.H3(len(df.columns))
-        ])), md=2),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H5("Districts"),
-            html.H3(df["District"].nunique() if "District" in df.columns else "—")
-        ])), md=2),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H5("Offices"),
-            html.H3(df["Office"].nunique() if "Office" in df.columns else "—")
-        ])), md=2),
-        dbc.Col(dbc.Card(dbc.CardBody([
-            html.H5("Services"),
-            html.H3(df["Service"].nunique() if "Service" in df.columns else "—")
-        ])), md=2),
-    ], className="mb-4"),
+    html.Div(id='metadata-dynamic-content'),
+], style={"padding": "20px"})
 
-    html.H4("📌 Column-level Information"),
+@app.callback(Output('metadata-dynamic-content', 'children'), Input('fy-store', 'data'))
+def update_metadata(fy):
+    df = FY_DATA[fy]['df']
+    fy_label = FY_DATA[fy]['label']
 
-    html.Div(id="metadata-table-container", children=[
+    top_srv_rec = get_top10_table(df, 'Service_Eng', 'Received')
+    top_srv_out = get_top10_table(df, 'Service_Eng', 'Disposed_Out')
+    top_off_rec = get_top10_table(df, 'Office_Eng', 'Received')
+    top_off_out = get_top10_table(df, 'Office_Eng', 'Disposed_Out')
+    top_dist_rec = get_top10_table(df, 'District_Eng', 'Received')
+    top_dist_out = get_top10_table(df, 'District_Eng', 'Disposed_Out')
+
+    return [
+        html.H5(f"Showing data for: {fy_label}", style={'color': '#2d6a9f', 'marginBottom': '12px'}),
+        dbc.Row([
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Records"), html.H3(f"{len(df):,}")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Columns"), html.H3(len(df.columns))])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Districts"), html.H3(df["District_Eng"].nunique() if "District_Eng" in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Offices"), html.H3(df["Office_Eng"].nunique() if "Office_Eng" in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Services"), html.H3(df["Service_Eng"].nunique() if "Service_Eng" in df.columns else "—")])), md=2),
+        ], className="mb-4"),
+        html.H4(f"📊 Top 10 Insights — {fy_label}", style={'marginTop': '30px'}),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col(create_dash_table("1. Top 10 Services (Total Received)", top_srv_rec), md=6),
+            dbc.Col(create_dash_table("2. Top 10 Services (Out of Time)", top_srv_out), md=6),
+        ], className="mb-4"),
+        dbc.Row([
+            dbc.Col(create_dash_table("3. Top 10 Offices (Total Received)", top_off_rec), md=6),
+            dbc.Col(create_dash_table("4. Top 10 Offices (Out of Time)", top_off_out), md=6),
+        ], className="mb-4"),
+        dbc.Row([
+            dbc.Col(create_dash_table("5. Top 10 Districts (Total Received)", top_dist_rec), md=6),
+            dbc.Col(create_dash_table("6. Top 10 Districts (Out of Time)", top_dist_out), md=6),
+        ], className="mb-5"),
+        html.H4("📌 Column-level Information"),
         dbc.Table([
-            html.Thead(html.Tr([
-                html.Th("Column"), html.Th("Data Type"), html.Th("Non-Null"),
-                html.Th("Nulls"), html.Th("Unique"), html.Th("Completeness"), html.Th("Sample")
-            ])),
+            html.Thead(html.Tr([html.Th("Column"), html.Th("Data Type"), html.Th("Non-Null"), html.Th("Nulls"), html.Th("Unique"), html.Th("Completeness"), html.Th("Sample")])),
             html.Tbody([
                 html.Tr([
                     html.Td(col),
@@ -52,180 +76,5 @@ layout = html.Div([
                     html.Td(str(df[col].dropna().iloc[0]) if df[col].notna().sum() > 0 else "N/A"),
                 ]) for col in df.columns
             ])
-        ], bordered=True, striped=True, hover=True, responsive=True, size="sm")
-    ])
-], style={"padding": "20px"})
-
-
-def render(df):
-    st.markdown(
-        """
-        <div style='background: linear-gradient(90deg, #1a3c5e 0%, #2d6a9f 100%);
-                    padding: 18px 28px; border-radius: 10px; margin-bottom: 20px;'>
-            <h2 style='color: white; margin: 0; font-size: 1.6rem; letter-spacing: 1px;'>
-                📋 Dataset Overview & Metadata
-            </h2>
-            <p style='color: #c8dff0; margin: 4px 0 0 0; font-size: 0.95rem;'>
-                Structural summary of the Digital Seva Setu dataset
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    total_rows = len(df)
-    total_cols = len(df.columns)
-    total_districts = df["District"].nunique() if "District" in df.columns else "—"
-    total_offices = df["Office"].nunique() if "Office" in df.columns else "—"
-    total_services = df["Service"].nunique() if "Service" in df.columns else "—"
-    date_range = (
-        f"{df['month_dt'].min().strftime('%b %Y')}  →  {df['month_dt'].max().strftime('%b %Y')}"
-        if "month_dt" in df.columns
-        else "—"
-    )
-
-    # ── KPI Cards ──────────────────────────────────────────────────────────────
-    st.markdown("#### 🗂️ At a Glance")
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    def kpi(col, label, value, icon=""):
-        col.markdown(
-            f"""
-            <div style='background:#f0f6ff; border-left: 5px solid #2d6a9f;
-                        padding: 14px 12px; border-radius: 8px; text-align:center;'>
-                <div style='font-size:1.5rem;'>{icon}</div>
-                <div style='font-size:1.55rem; font-weight:700; color:#1a3c5e;'>{value}</div>
-                <div style='font-size:0.78rem; color:#555; font-weight:600;
-                             text-transform:uppercase; letter-spacing:0.5px;'>{label}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    kpi(k1, "Total Records",   f"{total_rows:,}",       "📝")
-    kpi(k2, "Total Columns",   total_cols,               "🗃️")
-    kpi(k3, "Districts",       total_districts,          "🏛️")
-    kpi(k4, "Offices",         total_offices,            "🏢")
-    kpi(k5, "Services",        total_services,           "⚙️")
-    kpi(k6, "Date Range",      date_range,               "📅")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Column Information ─────────────────────────────────────────────────────
-    st.markdown("#### 📌 Column-level Information")
-
-    TYPE_COLOR = {
-        "object":          ("#e8f0fe", "#1a56db"),
-        "int64":           ("#e8f8f0", "#1e7e4a"),
-        "float64":         ("#fff8e1", "#c17f00"),
-        "datetime64[ns]":  ("#fce8f3", "#9c27b0"),
-    }
-
-    meta_rows = []
-    for col in df.columns:
-        dtype      = str(df[col].dtype)
-        non_null   = int(df[col].notna().sum())
-        null_count = int(df[col].isna().sum())
-        unique     = int(df[col].nunique())
-        completeness = f"{(non_null / total_rows * 100):.1f}%" if total_rows else "—"
-        sample     = df[col].dropna().iloc[0] if non_null > 0 else "N/A"
-        meta_rows.append(
-            {
-                "Column":        col,
-                "Data Type":     dtype,
-                "Non-Null Count": f"{non_null:,}",
-                "Null Count":    null_count,
-                "Completeness":  completeness,
-                "Unique Values": f"{unique:,}",
-                "Sample Value":  str(sample),
-            }
-        )
-
-    meta_df = pd.DataFrame(meta_rows)
-    st.dataframe(
-        meta_df.style.apply(
-            lambda _: [
-                f"background-color: {TYPE_COLOR.get(str(df[r['Column']].dtype), ('#fff','#000'))[0]};"
-                f"color: {TYPE_COLOR.get(str(df[r['Column']].dtype), ('#fff','#333'))[1]};"
-                f"font-weight:600;"
-                if c == "Data Type" else ""
-                for c in meta_df.columns
-            ],
-            axis=1,
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Summary Statistics ─────────────────────────────────────────────────────
-    st.markdown("#### 📊 Summary Statistics — Numeric Columns")
-    numeric_df = df.select_dtypes(include="number")
-    if not numeric_df.empty:
-        desc = numeric_df.describe().T.reset_index().rename(columns={"index": "Column"})
-        desc = desc.round(2)
-        st.dataframe(
-            desc.style.background_gradient(cmap="Blues", subset=["mean", "max"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No numeric columns found.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Categorical Distribution ───────────────────────────────────────────────
-    st.markdown("#### 🔠 Categorical Column Distribution")
-    cat_cols = df.select_dtypes(include="object").columns.tolist()
-    if cat_cols:
-        selected_col = st.selectbox(
-            "Select a categorical column to explore:", cat_cols, key="meta_cat_col"
-        )
-        dist = df[selected_col].value_counts().reset_index()
-        dist.columns = ["Value", "Count"]
-        dist["Share (%)"] = (dist["Count"] / dist["Count"].sum() * 100).round(2)
-
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.dataframe(
-                dist.style.bar(subset=["Count"], color="#2d6a9f")
-                         .format({"Share (%)": "{:.2f}%"}),
-                use_container_width=True,
-                hide_index=True,
-            )
-        with c2:
-            st.markdown(
-                f"""
-                <div style='background:#f0f6ff; border-radius:10px; padding:18px;'>
-                    <p style='margin:0; font-size:0.85rem; color:#555;'>Unique Values</p>
-                    <p style='margin:0; font-size:2rem; font-weight:700;
-                               color:#1a3c5e;'>{dist.shape[0]:,}</p>
-                    <hr style='border-color:#c8dff0;'>
-                    <p style='margin:0; font-size:0.85rem; color:#555;'>Top Value</p>
-                    <p style='margin:0; font-size:1rem; font-weight:600;
-                               color:#2d6a9f;'>{dist.iloc[0]['Value']}</p>
-                    <p style='margin:4px 0 0 0; font-size:0.85rem;
-                               color:#888;'>{dist.iloc[0]['Count']:,} records
-                               ({dist.iloc[0]['Share (%)']:.1f}%)</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.info("No categorical columns found.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Footer Note ────────────────────────────────────────────────────────────
-    st.markdown(
-        """
-        <div style='background:#f8f9fa; border: 1px solid #d0d7de;
-                    border-radius:8px; padding:12px 18px;
-                    color:#555; font-size:0.82rem;'>
-            <strong>Note:</strong> This metadata view is auto-generated from the loaded dataset.
-            Completeness is calculated as the percentage of non-null values per column.
-            Sample values are drawn from the first available non-null record.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        ], bordered=True, striped=True, hover=True, responsive=True, size="sm"),
+    ]

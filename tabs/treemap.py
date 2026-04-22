@@ -2,7 +2,7 @@ import dash
 from dash import dcc, html, Input, Output
 import plotly.express as px
 from app import app
-from data import df_tt, hierarchies, district_order
+from data import FY_DATA, hierarchies, district_order_2425
 
 layout = html.Div([
     html.H2("📊 Treemap Drill-down"),
@@ -17,7 +17,7 @@ layout = html.Div([
         ], style={"width": "30%", "margin-right": "20px"}),
         html.Div([
             html.Label("Filter by District:"),
-            dcc.Dropdown(id="district-filter", options=[{"label": d, "value": d} for d in district_order], multi=True,
+            dcc.Dropdown(id="district-filter", options=[{"label": d, "value": d} for d in district_order_2425], multi=True,
                          placeholder="Select District(s)"),
             html.Div([
                 html.Button("Top 3 Districts", id="top3-btn", n_clicks=0, style={"margin-right": "10px"}),
@@ -33,8 +33,9 @@ layout = html.Div([
 ], style={"padding": "20px"})
 
 
-@app.callback(Output("office-filter", "options"), Input("district-filter", "value"))
-def update_office_options(selected_districts):
+@app.callback(Output("office-filter", "options"), Input("district-filter", "value"), Input("fy-store", "data"))
+def update_office_options(selected_districts, fy):
+    df_tt = FY_DATA[fy]['df_tt']
     filtered_df = df_tt.copy()
     if selected_districts: filtered_df = filtered_df[filtered_df["District_Eng"].isin(selected_districts)]
     office_order = filtered_df.groupby("Office_Eng")["Disposed_Out"].sum().sort_values(ascending=False).index.tolist()
@@ -44,9 +45,10 @@ def update_office_options(selected_districts):
 @app.callback(
     Output("treemap", "figure"),
     Input("district-filter", "value"), Input("office-filter", "value"),
-    Input("hierarchy-choice", "value"), Input("top3-btn", "n_clicks"), Input("bottom3-btn", "n_clicks")
+    Input("hierarchy-choice", "value"), Input("top3-btn", "n_clicks"), Input("bottom3-btn", "n_clicks"), Input("fy-store", "data")
 )
-def update_treemap(selected_districts, selected_offices, hierarchy_choice, top3_clicks, bottom3_clicks):
+def update_treemap(selected_districts, selected_offices, hierarchy_choice, top3_clicks, bottom3_clicks, fy):
+    df_tt = FY_DATA[fy]['df_tt']
     filtered_df = df_tt.copy()
     ctx = dash.callback_context
     if ctx.triggered:
@@ -76,3 +78,13 @@ def update_treemap(selected_districts, selected_offices, hierarchy_choice, top3_
         textinfo="label+value"
     )
     return fig
+
+
+@app.callback(
+    Output("district-filter", "options"),
+    Output("district-filter", "value"),
+    Input("fy-store", "data")
+)
+def update_district_options(fy):
+    opts = [{"label": d, "value": d} for d in FY_DATA[fy]['district_order']]
+    return opts, None
