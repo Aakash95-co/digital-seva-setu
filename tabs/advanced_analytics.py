@@ -82,7 +82,10 @@ def _prepare_df(raw):
             df[c] = df[c].astype(str).str.strip()
     for c in ('OOT', 'Total'):
         df = df.loc[:, ~df.columns.duplicated()]
-        df[c] = pd.to_numeric(df.get(c, 0), errors='coerce').fillna(0).astype(int)
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
+        else:
+            df[c] = 0
     return df
 
 
@@ -1013,7 +1016,8 @@ def toggle_detail(n_list, is_open_list, district, period):
     snap['StAvg'] = snap['Service'].map(lambda s: svc_avg.get(s, 0.0))
     snap['vs'] = snap['OOT_Rate'] - snap['StAvg']
     t_total = snap['Total'].sum()
-    snap['Share'] = snap['OOT'].apply(lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
+    snap['Share'] = snap['OOT'].apply(
+        lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
     snap.sort_values('OOT_Rate', ascending=False, inplace=True)
     svc_str = _service_consistency(office, y, m)
 
