@@ -5,7 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from app import app
-from data import FY_DATA, all_months_2425, month_options_2425, COLOR_PALETTE
+from data import FY_DATA, COLOR_PALETTE
+
 layout = dbc.Container([
     dbc.Row(dbc.Col(html.H1("Service Performance Analytics Dashboard", className="text-center text-primary my-4"))),
     dbc.Card(dbc.CardBody([
@@ -20,9 +21,16 @@ layout = dbc.Container([
                 )
             ], md=6),
             dbc.Col([
-                html.Label("2. Select Time Period", className="fw-bold"),
-                dcc.Dropdown(id='month-dropdown', options=month_options_2425,
-             value=[all_months_2425[-1]] if all_months_2425 else [], multi=True)
+                html.Label("2. Select Financial Year", className="fw-bold"),
+                dbc.RadioItems(
+                    id='mt-fy-selector',
+                    options=[
+                        {'label': 'FY 2024-25', 'value': '2425'},
+                        {'label': 'FY 2025-26', 'value': '2526'},
+                    ],
+                    value='2425',
+                    inline=True,
+                )
             ], md=6)
         ], className="mb-3"),
         html.Hr(),
@@ -76,16 +84,8 @@ layout = dbc.Container([
 ], fluid=True, className="bg-light p-4")
 
 
-@app.callback(Output('month-dropdown', 'value'), Input('month-dropdown', 'value'))
-def select_all_months(selected):
-    if selected is None: return [all_months[-1]] if all_months else []
-    if 'ALL_MONTHS' in selected: return all_months
-    return selected
-
-
 @app.callback([Output('single-entity-wrapper', 'style'), Output('comparison-entity-wrapper', 'style')],
-              Input('analysis-mode-selector', 'value')
-              )
+              Input('analysis-mode-selector', 'value'))
 def toggle_entity_selectors(mode):
     if mode == 'single': return {'display': 'block'}, {'display': 'none'}
     return {'display': 'none'}, {'display': 'block'}
@@ -93,13 +93,11 @@ def toggle_entity_selectors(mode):
 
 @app.callback([Output('single-entity-dropdown', 'options'), Output('entity1-dropdown', 'options'),
                Output('entity2-dropdown', 'options')],
-              [Input('primary-level', 'value'), Input('month-dropdown', 'value'), Input('fy-store', 'data')]
-              )
-def update_entity_options(primary_level, selected_months, fy):
-    df_mt = FY_DATA[fy]['df_mt']
-    if not selected_months: return [], [], []
+              [Input('primary-level', 'value'), Input('mt-fy-selector', 'value')])
+def update_entity_options(primary_level, fy_local):
+    df_mt = FY_DATA[fy_local]['df_mt']
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
-    entities = sorted(df_mt[df_mt['Month_Year'].isin(selected_months)][col_map[primary_level]].unique())
+    entities = sorted(df_mt[col_map[primary_level]].unique())
     options = [{'label': e, 'value': e} for e in entities]
     return options, options, options
 
@@ -125,19 +123,17 @@ def reset_drill_levels_on_primary_change(_): return []
                Output('drilldown-office-dropdown', 'style'),
                Output('drilldown-district-dropdown', 'options'), Output('drilldown-district-dropdown', 'value'),
                Output('drilldown-district-dropdown', 'style')],
-              [Input('drill-down-levels', 'value'), Input('primary-level', 'value'), Input('month-dropdown', 'value'),
+              [Input('drill-down-levels', 'value'), Input('primary-level', 'value'),
+               Input('mt-fy-selector', 'value'),
                Input('analysis-mode-selector', 'value'), Input('single-entity-dropdown', 'value'),
-               Input('entity1-dropdown', 'value'), Input('entity2-dropdown', 'value'),
-               Input('fy-store', 'data')],
+               Input('entity1-dropdown', 'value'), Input('entity2-dropdown', 'value')],
               [State('drilldown-service-dropdown', 'value'), State('drilldown-office-dropdown', 'value'),
-               State('drilldown-district-dropdown', 'value')]
-              )
-def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, single_entity, entity1, entity2,
-                                 fy,
+               State('drilldown-district-dropdown', 'value')])
+def populate_drilldown_dropdowns(drill_levels, primary_level, fy_local, mode, single_entity, entity1, entity2,
                                  current_service, current_office, current_district):
     hide = {'display': 'none'}
-    if not months: return (dash.no_update,) * 9
-    df_mt_light = FY_DATA[fy]['df_mt_light']
+    months = FY_DATA[fy_local]['all_months']
+    df_mt_light = FY_DATA[fy_local]['df_mt_light']
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
     df_base = df_mt_light[df_mt_light['Month_Year'].isin(months)]
@@ -146,22 +142,19 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
     elif mode == 'comparison' and entity1 and entity2:
         df_base = df_base[df_base[primary_col].isin([entity1, entity2])]
 
-    show_service, show_office, show_district = 'service' in (drill_levels or []), 'office' in (
-                drill_levels or []), 'district' in (drill_levels or [])
-    specific_service, specific_office, specific_district = bool(
-        current_service and not str(current_service).startswith('ALL_')), bool(
-        current_office and not str(current_office).startswith('ALL_')), bool(
-        current_district and not str(current_district).startswith('ALL_'))
+    show_service = 'service' in (drill_levels or [])
+    show_office = 'office' in (drill_levels or [])
+    show_district = 'district' in (drill_levels or [])
 
     def oot_counts_sorted(dataframe, col_name):
         if col_name not in dataframe.columns: return pd.Series(dtype='int64')
         s = dataframe.groupby(col_name)['application_Disposed_Out_of_time'].sum().sort_values(ascending=False)
         return s[s.index.map(lambda x: isinstance(x, str) and x.strip() != '')]
 
-    def build_opts(counts_series, all_label, include_counts=False):
+    def build_opts(counts_series, all_label):
         opts = [{'label': f'All {all_label}', 'value': f'ALL_{all_label.upper().replace(" ", "_")}'}]
         for v, c in counts_series.items():
-            opts.append({'label': f"{v} ({int(c):,})" if include_counts else v, 'value': v})
+            opts.append({'label': v, 'value': v})
         return opts
 
     service_opts = build_opts(oot_counts_sorted(df_base, 'Service_name'), 'Service')
@@ -169,7 +162,7 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
     district_opts = build_opts(oot_counts_sorted(df_base, 'District_name'), 'District')
 
     trigger_ids = [t['prop_id'].split('.')[0] for t in dash.callback_context.triggered]
-    reset = any(t in ('primary-level', 'month-dropdown', 'analysis-mode-selector') for t in trigger_ids)
+    reset = any(t in ('primary-level', 'mt-fy-selector', 'analysis-mode-selector') for t in trigger_ids)
 
     def resolve(val, valid):
         return val if val and (val in set(valid) or str(val).startswith('ALL_')) else None
@@ -190,27 +183,27 @@ def populate_drilldown_dropdowns(drill_levels, primary_level, months, mode, sing
 
 @app.callback([Output('analysis-status', 'children'), Output('performance-summary', 'children'),
                Output('main-visualizations', 'children'), Output('detailed-breakdown', 'children')],
-              [Input('analysis-mode-selector', 'value'), Input('month-dropdown', 'value'),
+              [Input('analysis-mode-selector', 'value'), Input('mt-fy-selector', 'value'),
                Input('single-entity-dropdown', 'value'), Input('entity1-dropdown', 'value'),
                Input('entity2-dropdown', 'value'),
                Input('drill-down-levels', 'value'), Input('drilldown-service-dropdown', 'value'),
                Input('drilldown-office-dropdown', 'value'), Input('drilldown-district-dropdown', 'value')],
-              [State('primary-level', 'value'), State('fy-store', 'data')]   # ← fy as State
-              )
-def update_dashboard(mode, months, single_entity, entity1, entity2, drill_levels, service_filter, office_filter,
-                     district_filter, primary_level, fy):   # ← add fy
-    df_mt = FY_DATA[fy]['df_mt']   # ← add this as first line
-    if not months: return dbc.Alert("Please select a time period.", color="warning"), None, None, None
+              [State('primary-level', 'value')])
+def update_dashboard(mode, fy_local, single_entity, entity1, entity2, drill_levels, service_filter, office_filter,
+                     district_filter, primary_level):
+    df_mt = FY_DATA[fy_local]['df_mt']
+    months = FY_DATA[fy_local]['all_months']
+    if not months: return dbc.Alert("No data for selected FY.", color="warning"), None, None, None
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
     primary_col = col_map[primary_level]
 
     def filter_df(df_target):
-        if 'service' in (drill_levels or []) and service_filter and not str(service_filter).startswith(
-            'ALL_'): df_target = df_target[df_target['Service_name'] == service_filter]
-        if 'office' in (drill_levels or []) and office_filter and not str(office_filter).startswith('ALL_'): df_target = \
-        df_target[df_target['Office_name'] == office_filter]
-        if 'district' in (drill_levels or []) and district_filter and not str(district_filter).startswith(
-            'ALL_'): df_target = df_target[df_target['District_name'] == district_filter]
+        if 'service' in (drill_levels or []) and service_filter and not str(service_filter).startswith('ALL_'):
+            df_target = df_target[df_target['Service_name'] == service_filter]
+        if 'office' in (drill_levels or []) and office_filter and not str(office_filter).startswith('ALL_'):
+            df_target = df_target[df_target['Office_name'] == office_filter]
+        if 'district' in (drill_levels or []) and district_filter and not str(district_filter).startswith('ALL_'):
+            df_target = df_target[df_target['District_name'] == district_filter]
         return df_target
 
     if mode == 'single':
@@ -218,27 +211,21 @@ def update_dashboard(mode, months, single_entity, entity1, entity2, drill_levels
         df1 = filter_df(df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == single_entity)])
         if df1.empty: return dbc.Alert(f"Displaying analysis for: {single_entity}", color="success"), dbc.Alert(
             "No data available for this selection.", color="warning"), None, None
-        return dbc.Alert(f"Displaying analysis for: {single_entity}", color="success"), generate_summary_cards(df1,
-                                                                                                               None,
-                                                                                                               single_entity,
-                                                                                                               None,
-                                                                                                               mode), generate_main_visuals(
-            df1, None, single_entity, None, months, mode, primary_level), html.P(
-            "Drill-down selections act as filters only.", className="text-muted")
+        return (dbc.Alert(f"Displaying analysis for: {single_entity}", color="success"),
+                generate_summary_cards(df1, None, single_entity, None, mode),
+                generate_main_visuals(df1, None, single_entity, None, months, mode, primary_level, df_mt),
+                html.P("Drill-down selections act as filters only.", className="text-muted"))
     else:
-        if not entity1 or not entity2: return dbc.Alert("Please select two entities to compare.",
-                                                        color="info"), None, None, None
-        if entity1 == entity2: return dbc.Alert("Please select different entities for comparison.",
-                                                color="warning"), None, None, None
-        df1, df2 = filter_df(df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == entity1)]), filter_df(
-            df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == entity2)])
+        if not entity1 or not entity2: return dbc.Alert("Please select two entities to compare.", color="info"), None, None, None
+        if entity1 == entity2: return dbc.Alert("Please select different entities for comparison.", color="warning"), None, None, None
+        df1 = filter_df(df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == entity1)])
+        df2 = filter_df(df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == entity2)])
         if df1.empty and df2.empty: return dbc.Alert(f"Comparing {entity1} vs {entity2}", color="success"), dbc.Alert(
             "No data for this selection.", color="warning"), None, None
-        return dbc.Alert(f"Comparing {entity1} vs {entity2}", color="success"), generate_summary_cards(df1, df2,
-                                                                                                       entity1, entity2,
-                                                                                                       mode), generate_main_visuals(
-            df1, df2, entity1, entity2, months, mode, primary_level), html.P(
-            "Drill-down selections act as filters only.", className="text-muted")
+        return (dbc.Alert(f"Comparing {entity1} vs {entity2}", color="success"),
+                generate_summary_cards(df1, df2, entity1, entity2, mode),
+                generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_level, df_mt),
+                html.P("Drill-down selections act as filters only.", className="text-muted"))
 
 
 def generate_summary_cards(df1, df2, entity1, entity2, mode):
@@ -261,7 +248,7 @@ def generate_summary_cards(df1, df2, entity1, entity2, mode):
     return dbc.Row(cards, justify="center")
 
 
-def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_level):
+def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_level, df_mt):
     def build_trend_figs(dfX, entity_label):
         if dfX.empty: return html.P(f"No data available for {entity_label}.", className="text-muted")
         metrics = [('application_Received', 'Applications Received', '#1f77b4'),
@@ -272,35 +259,35 @@ def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_leve
         trend_data = dfX.groupby('Month_Year')[
             ['application_Received', 'application_Disposed', 'application_Disposed_with_in_time',
              'application_Disposed_Out_of_time', 'Pending_Applications', 'Efficiency_Percentage']].agg(
-            {'application_Received': 'sum', 'application_Disposed': 'sum', 'application_Disposed_with_in_time': 'sum',
+            {'application_Received': 'sum', 'application_Disposed': 'sum',
+             'application_Disposed_with_in_time': 'sum',
              'application_Disposed_Out_of_time': 'sum', 'Pending_Applications': 'sum',
              'Efficiency_Percentage': 'mean'}).reset_index()
         trend_data['Date'] = pd.to_datetime(trend_data['Month_Year'], format='%b-%Y', errors='coerce')
         trend_data = trend_data.sort_values('Date')
 
         fig_scaler = go.Figure()
-        for col, label, color in metrics: fig_scaler.add_trace(
-            go.Scatter(x=trend_data['Month_Year'], y=trend_data[col], mode='lines+markers', name=label,
-                       line=dict(color=color)))
-        fig_scaler.update_layout(title=f"{entity_label} - Scaler Values", template="plotly_white", xaxis_title="Month",
-                                 yaxis_title="Value")
+        for col, label, color in metrics:
+            fig_scaler.add_trace(go.Scatter(x=trend_data['Month_Year'], y=trend_data[col],
+                                            mode='lines+markers', name=label, line=dict(color=color)))
+        fig_scaler.update_layout(title=f"{entity_label} - Scaler Values", template="plotly_white",
+                                 xaxis_title="Month", yaxis_title="Value")
 
         fig_percent = go.Figure()
-        fig_percent.add_trace(
-            go.Scatter(x=trend_data['Month_Year'], y=trend_data['Efficiency_Percentage'], mode='lines+markers',
-                       name="Efficiency %", line=dict(color='#9467bd')))
-        if primary_level == 'district' and set(months or []) == set(df_mt['Month_Year'].unique()):
+        fig_percent.add_trace(go.Scatter(x=trend_data['Month_Year'], y=trend_data['Efficiency_Percentage'],
+                                         mode='lines+markers', name="Efficiency %", line=dict(color='#9467bd')))
+        if primary_level == 'district' and set(months) == set(df_mt['Month_Year'].unique()):
             trend_data['Out_of_Time_%'] = trend_data.apply(
-                lambda row: (row['application_Disposed_Out_of_time'] / row['application_Disposed'] * 100) if row[
-                                                                                                                 'application_Disposed'] > 0 else 0,
-                axis=1)
-            fig_percent.add_trace(
-                go.Scatter(x=trend_data['Month_Year'], y=trend_data['Out_of_Time_%'], mode='lines+markers',
-                           name='Out-of-Time %', line=dict(color='#8c564b', dash='dash')))
-        fig_percent.update_layout(title=f"{entity_label} - Efficiency %", template="plotly_white", xaxis_title="Month",
-                                  yaxis_title="Percentage", yaxis=dict(range=[0, 100]))
+                lambda row: (row['application_Disposed_Out_of_time'] / row['application_Disposed'] * 100)
+                if row['application_Disposed'] > 0 else 0, axis=1)
+            fig_percent.add_trace(go.Scatter(x=trend_data['Month_Year'], y=trend_data['Out_of_Time_%'],
+                                              mode='lines+markers', name='Out-of-Time %',
+                                              line=dict(color='#8c564b', dash='dash')))
+        fig_percent.update_layout(title=f"{entity_label} - Efficiency %", template="plotly_white",
+                                   xaxis_title="Month", yaxis_title="Percentage", yaxis=dict(range=[0, 100]))
 
-        return html.Div([dcc.Graph(figure=fig_scaler, style={'marginBottom': '24px'}), dcc.Graph(figure=fig_percent),
+        return html.Div([dcc.Graph(figure=fig_scaler, style={'marginBottom': '24px'}),
+                         dcc.Graph(figure=fig_percent),
                          html.Div(f"Out-of-Time (Total): {int(dfX['application_Disposed_Out_of_time'].sum()):,}",
                                   className="text-muted mt-2", style={'fontWeight': '600'})])
 
