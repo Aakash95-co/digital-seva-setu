@@ -19,6 +19,12 @@ def create_dash_table(title, dataframe):
         dbc.Table.from_dataframe(dataframe, striped=True, bordered=True, hover=True, size="sm")
     ])
 
+def _oot_tile(df):
+    oot = int(df['Disposed_Out'].sum()) if 'Disposed_Out' in df.columns else 0
+    disp = int(df['Disposed'].sum()) if 'Disposed' in df.columns else 0
+    pct = f" ({oot/disp*100:.1f}%)" if disp > 0 else ""
+    return f"{oot:,}{pct}"
+
 layout = html.Div([
     html.H2("📋 Dataset Overview & Metadata", style={
         'background': 'linear-gradient(90deg, #1a3c5e 0%, #2d6a9f 100%)',
