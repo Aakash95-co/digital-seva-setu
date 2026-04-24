@@ -69,19 +69,4 @@ def update_metadata(fy):
             dbc.Col(create_dash_table("5. Top 10 Districts (Total Received)", top_dist_rec), md=6),
             dbc.Col(create_dash_table("6. Top 10 Districts (Out of Time)", top_dist_out), md=6),
         ], className="mb-5"),
-        html.H4("📌 Column-level Information"),
-        dbc.Table([
-            html.Thead(html.Tr([html.Th("Column"), html.Th("Data Type"), html.Th("Non-Null"), html.Th("Nulls"), html.Th("Unique"), html.Th("Completeness"), html.Th("Sample")])),
-            html.Tbody([
-                html.Tr([
-                    html.Td(col),
-                    html.Td(str(df[col].dtype)),
-                    html.Td(f"{df[col].notna().sum():,}"),
-                    html.Td(f"{df[col].isna().sum():,}"),
-                    html.Td(f"{df[col].nunique():,}"),
-                    html.Td(f"{df[col].notna().sum() / len(df) * 100:.1f}%" if len(df) else "—"),
-                    html.Td(str(df[col].dropna().iloc[0]) if df[col].notna().sum() > 0 else "N/A"),
-                ]) for col in df.columns
-            ])
-        ], bordered=True, striped=True, hover=True, responsive=True, size="sm"),
     ]
