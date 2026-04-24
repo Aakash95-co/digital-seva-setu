@@ -62,18 +62,29 @@ def _prepare_df(raw):
     if 'Total' in df.columns and 'application_Disposed' in df.columns:
         df.drop(columns=['Total'], inplace=True)
 
+    # Handle both _name (from _load_mt) and _Eng (raw CSV) column naming conventions
     _map = {
-        'District_name': 'District', 'Office_name': 'Office',
-        'Service_name': 'Service',
+        'District_name': 'District', 'District_Eng': 'District',
+        'Office_name': 'Office',     'Office_Eng': 'Office',
+        'Service_name': 'Service',   'Service_Eng': 'Service',
         'application_Disposed_Out_of_time': 'OOT',
         'application_Disposed': 'Total',
     }
     df.rename(columns={k: v for k, v in _map.items() if k in df.columns}, inplace=True)
 
     if 'month_dt' not in df.columns:
+        # Normalise year/month column names (raw CSV uses Yr/Mn, _load_mt renames to Year/Month)
+        if 'Yr' in df.columns and 'Year' not in df.columns:
+            df.rename(columns={'Yr': 'Year'}, inplace=True)
+        if 'Mn' in df.columns and 'Month' not in df.columns:
+            df.rename(columns={'Mn': 'Month'}, inplace=True)
+
         if 'Year' in df.columns and 'Month' in df.columns:
+            df['Year'] = pd.to_numeric(df['Year'].astype(str).str.replace('\ufeff', '', regex=False).str.strip(), errors='coerce')
+            df['Month'] = pd.to_numeric(df['Month'], errors='coerce')
+            df.dropna(subset=['Year', 'Month'], inplace=True)
             df['month_dt'] = pd.to_datetime(
-                df['Year'].astype(str) + '-' + df['Month'].astype(str).str.zfill(2) + '-01')
+                df['Year'].astype(int).astype(str) + '-' + df['Month'].astype(int).astype(str).str.zfill(2) + '-01')
         else:
             df['month_dt'] = pd.NaT
 

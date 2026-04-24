@@ -21,35 +21,49 @@ MONTH_NAMES = {
 # ═════════════════════════════════════════════════════════════════════════════
 def _prepare_df(raw):
     if raw is None or raw.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['District', 'Office', 'Service', 'OOT', 'Total', 'month_dt'])
 
     df = raw.copy()
     df.columns = df.columns.str.strip()
 
     if 'Total' in df.columns and 'application_Disposed' in df.columns:
-        df.drop('Total', axis=1, inplace=True)
+        df.drop(columns=['Total'], inplace=True)
 
+    # Handle both _name (from _load_mt) and _Eng (raw CSV) column naming conventions
     _map = {
-        'District_name': 'District',
-        'Office_name': 'Office',
-        'Service_name': 'Service',
+        'District_name': 'District', 'District_Eng': 'District',
+        'Office_name': 'Office',     'Office_Eng': 'Office',
+        'Service_name': 'Service',   'Service_Eng': 'Service',
         'application_Disposed_Out_of_time': 'OOT',
         'application_Disposed': 'Total',
     }
     df.rename(columns={k: v for k, v in _map.items() if k in df.columns}, inplace=True)
 
     if 'month_dt' not in df.columns:
-        if 'Year' in df.columns and 'Month' in df.columns:  # ✅ Capital case
-            df['month_dt'] = pd.to_datetime(df[['Year', 'Month']].assign(day=1))  # ✅ Capital case
+        # Normalise year/month column names (raw CSV uses Yr/Mn, _load_mt renames to Year/Month)
+        if 'Yr' in df.columns and 'Year' not in df.columns:
+            df.rename(columns={'Yr': 'Year'}, inplace=True)
+        if 'Mn' in df.columns and 'Month' not in df.columns:
+            df.rename(columns={'Mn': 'Month'}, inplace=True)
+
+        if 'Year' in df.columns and 'Month' in df.columns:
+            df['Year'] = pd.to_numeric(df['Year'].astype(str).str.replace('\ufeff', '', regex=False).str.strip(), errors='coerce')
+            df['Month'] = pd.to_numeric(df['Month'], errors='coerce')
+            df.dropna(subset=['Year', 'Month'], inplace=True)
+            df['month_dt'] = pd.to_datetime(
+                df['Year'].astype(int).astype(str) + '-' + df['Month'].astype(int).astype(str).str.zfill(2) + '-01')
         else:
-            return pd.DataFrame()
+            df['month_dt'] = pd.NaT
 
     for c in ('District', 'Office', 'Service'):
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
     for c in ('OOT', 'Total'):
+        df = df.loc[:, ~df.columns.duplicated()]
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
+        else:
+            df[c] = 0
     return df
 
 
