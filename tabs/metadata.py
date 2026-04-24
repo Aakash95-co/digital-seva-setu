@@ -48,11 +48,12 @@ def update_metadata(fy):
     return [
         html.H5(f"Showing data for: {fy_label}", style={'color': '#2d6a9f', 'marginBottom': '12px'}),
         dbc.Row([
-            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Records"), html.H3(f"{len(df):,}")])), md=2),
-            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Columns"), html.H3(len(df.columns))])), md=2),
-            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Districts"), html.H3(df["District_Eng"].nunique() if "District_Eng" in df.columns else "—")])), md=2),
-            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Offices"), html.H3(df["Office_Eng"].nunique() if "Office_Eng" in df.columns else "—")])), md=2),
-            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Services"), html.H3(df["Service_Eng"].nunique() if "Service_Eng" in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Districts"),            html.H3(df["District_Eng"].nunique() if "District_Eng" in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Offices"),              html.H3(df["Office_Eng"].nunique()   if "Office_Eng"   in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Services"),             html.H3(df["Service_Eng"].nunique()  if "Service_Eng"  in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Received"),       html.H3(f"{int(df['Received'].sum()):,}"   if 'Received'    in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Total Disposed"),       html.H3(f"{int(df['Disposed'].sum()):,}"   if 'Disposed'    in df.columns else "—")])), md=2),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H5("Disposed Out of Time"), html.H3(_oot_tile(df))])), md=2),
         ], className="mb-4"),
         html.H4(f"📊 Top 10 Insights — {fy_label}", style={'marginTop': '30px'}),
         html.Hr(),
