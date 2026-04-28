@@ -142,11 +142,7 @@ COLOR_PALETTE = {
 
 # ===================== Advanced Analytics Data =====================
 try:
-    df_adv = pd.read_csv("Merge-digital-data-22-25.csv", encoding="utf-8-sig", low_memory=False)
-    df_adv.columns = df_adv.columns.str.strip()
-    for c in ['Year', 'Month', 'application_Disposed_Out_of_time', 'application_Disposed']:
-        if c in df_adv.columns:
-            df_adv[c] = pd.to_numeric(df_adv[c], errors='coerce').fillna(0).astype(int)
+    df_adv = _load_mt("Merge-digital-data-22-25.csv")
 except Exception as e:
     print(f"Warning: Failed to load Advanced Analytics data: {e}")
     df_adv = pd.DataFrame(columns=['Year', 'Month', 'Service_name', 'District_name', 'Office_name', 'application_Disposed_Out_of_time', 'application_Disposed'])
