@@ -257,12 +257,14 @@ def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_leve
                    ]
         trend_data = dfX.groupby('Month_Year')[
             ['application_Received', 'application_Disposed', 'application_Disposed_with_in_time',
-             'application_Disposed_Out_of_time', 'Efficiency_Percentage']].agg(
-            {'application_Received': 'sum', 'application_Disposed': 'sum',
-             'application_Disposed_with_in_time': 'sum',
-             'application_Disposed_Out_of_time': 'sum', 'Efficiency_Percentage': 'mean'}).reset_index()
+             'application_Disposed_Out_of_time']].agg(
+    {'application_Received': 'sum', 'application_Disposed': 'sum',
+     'application_Disposed_with_in_time': 'sum',
+     'application_Disposed_Out_of_time': 'sum'}).reset_index()
+        trend_data['Efficiency_Percentage'] = (
+            trend_data['application_Disposed_with_in_time'] / trend_data['application_Disposed'] * 100
+        ).where(trend_data['application_Disposed'] > 0, 0)
         trend_data['Date'] = pd.to_datetime(trend_data['Month_Year'], format='%b-%Y', errors='coerce')
-        trend_data = trend_data.sort_values('Date')
 
         fig_scaler = go.Figure()
         for col, label, color in metrics:
