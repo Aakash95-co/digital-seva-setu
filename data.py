@@ -4,11 +4,12 @@ import pandas as pd
 def _load_raw(filename):
     d = pd.read_csv(filename, encoding="utf-8-sig", low_memory=False)
     d.columns = d.columns.str.replace('\ufeff', '', regex=False).str.strip()
-    for col in ["Service_Eng", "Office_Eng", "District_Eng", "Received", "Disposed_Out"]:
+    for col in ["Yr", "Mn", "Service_Eng", "Office_Eng", "District_Eng",
+                "Received", "Disposed_Out", "Disposed", "Disposed_with_in", "Pending", "Total"]:
         if col not in d.columns:
             d[col] = 0
-    d["Received"] = pd.to_numeric(d["Received"], errors="coerce").fillna(0).astype(int)
-    d["Disposed_Out"] = pd.to_numeric(d["Disposed_Out"], errors="coerce").fillna(0).astype(int)
+    for col in ["Received", "Disposed_Out", "Disposed", "Pending", "Total"]:
+        d[col] = pd.to_numeric(d[col], errors="coerce").fillna(0).astype(int)
     return d
 
 def _load_tt(filename):

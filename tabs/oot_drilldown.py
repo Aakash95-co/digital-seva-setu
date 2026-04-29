@@ -4,23 +4,33 @@ import plotly.graph_objects as go
 from dash import html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 from app import app
-from data import df as df_raw
+from data import FY_DATA   # was: from data import df as df_raw
+
+# EXTRACT DATA PREP INTO A FUNCTION:
+def _prep_df(raw_df):
+    df = raw_df.copy()
+    df["Yr"] = df["Yr"].astype(str).str.strip().str.replace("\ufeff", "", regex=False)
+    df["Mn"] = pd.to_numeric(df["Mn"], errors="coerce").fillna(0).astype(int)
+    df["month_dt"] = pd.to_datetime(
+        df["Yr"] + "-" + df["Mn"].astype(str).str.zfill(2) + "-01",
+        format="%Y-%m-%d", errors="coerce"
+    )
+    df.dropna(subset=["month_dt"], inplace=True)
+    df["Month_Year"] = df["month_dt"].dt.strftime("%b-%Y")
+    df["Disposed_Out"] = pd.to_numeric(df["Disposed_Out"], errors="coerce").fillna(0).astype(int)
+    df["Received"] = pd.to_numeric(df["Received"], errors="coerce").fillna(0).astype(int)
+    return df
+
+# KEEP INITIAL DEFAULTS (for first render, use 2425)
+_df_init = _prep_df(FY_DATA['2425']['df'])
+_all_months_init = sorted(_df_init["Month_Year"].unique(), key=lambda x: pd.to_datetime(x, format="%b-%Y"))
+_month_opts_init = [{"label": m, "value": m} for m in _all_months_init]
+_default_months_init = _all_months_init[-3:] if len(_all_months_init) >= 3 else _all_months_init
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME DATA PREP
 # ─────────────────────────────────────────────────────────────────────────────
-_df = df_raw.copy()
-_df["Yr"] = _df["Yr"].astype(str).str.strip().str.replace("\ufeff", "", regex=False)
-_df["Mn"] = pd.to_numeric(_df["Mn"], errors="coerce").fillna(0).astype(int)
-_df["month_dt"] = pd.to_datetime(
-    _df["Yr"] + "-" + _df["Mn"].astype(str).str.zfill(2) + "-01",
-    format="%Y-%m-%d", errors="coerce"
-)
-_df.dropna(subset=["month_dt"], inplace=True)
-_df["Month_Year"] = _df["month_dt"].dt.strftime("%b-%Y")
-_df["Disposed_Out"] = pd.to_numeric(_df["Disposed_Out"], errors="coerce").fillna(0).astype(int)
-_df["Received"] = pd.to_numeric(_df["Received"], errors="coerce").fillna(0).astype(int)
-
+_df = _prep_df(FY_DATA['2425']['df'])
 _all_months = sorted(_df["Month_Year"].unique(), key=lambda x: pd.to_datetime(x, format="%b-%Y"))
 _month_opts = [{"label": m, "value": m} for m in _all_months]
 _default_months = _all_months[-3:] if len(_all_months) >= 3 else _all_months
@@ -113,19 +123,14 @@ layout = dbc.Container([
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def _filtered_df(months):
+def _filtered_df(df, months):
     if not months:
-        return _df
-    return _df[_df["Month_Year"].isin(months)]
+        return df
+    return df[df["Month_Year"].isin(months)]
 
 
-def _build_outputs(months, primary_dim, primary_n):
-    primary_n = max(1, int(primary_n or 6))
-
-    # HARDCODED: Always find exactly 3 worst offenders per item
-    SECONDARY_M = 3
-
-    base = _filtered_df(months)
+def _build_outputs(df, months, primary_dim, primary_n):
+    base = _filtered_df(df, months)
     if base.empty:
         return None, None, 0, primary_n
 
@@ -305,11 +310,11 @@ def _build_heatmap_fig(pivot_oot, pivot_rec, months):
     Input("oot-month-filter", "value"),
     Input("oot-primary-dim", "value"),
     Input("oot-n-primary", "value"),
+    Input("fy-store", "data"),          # ← ADD THIS
 )
-def update_oot(months, primary_dim, primary_n):
-    pivot_oot, pivot_rec, state_total_oot, p_n = _build_outputs(
-        months, primary_dim, primary_n
-    )
+def update_oot(months, primary_dim, primary_n, fy):
+    df = _prep_df(FY_DATA[fy]['df'])    # ← build correct FY df
+    pivot_oot, pivot_rec, state_total_oot, p_n = _build_outputs(df, months, primary_dim, primary_n)
 
     def _empty_fig(msg):
         f = go.Figure()
@@ -343,3 +348,15 @@ def update_oot(months, primary_dim, primary_n):
     ], color="danger", className="py-2 px-3 border-0 shadow-sm rounded-3 mb-2", style={"backgroundColor": "#f8d7da"})
 
     return fig, status
+
+@app.callback(
+    Output("oot-month-filter", "options"),
+    Output("oot-month-filter", "value"),
+    Input("fy-store", "data"),
+)
+def update_oot_month_options(fy):
+    df = _prep_df(FY_DATA[fy]['df'])
+    months = sorted(df["Month_Year"].unique(), key=lambda x: pd.to_datetime(x, format="%b-%Y"))
+    opts = [{"label": m, "value": m} for m in months]
+    default = months[-3:] if len(months) >= 3 else months
+    return opts, default
