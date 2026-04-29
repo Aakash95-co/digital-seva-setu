@@ -130,6 +130,9 @@ def _filtered_df(df, months):
 
 
 def _build_outputs(df, months, primary_dim, primary_n):
+    primary_n = max(1, int(primary_n or 6))
+    SECONDARY_M = 3
+
     base = _filtered_df(df, months)
     if base.empty:
         return None, None, 0, primary_n
