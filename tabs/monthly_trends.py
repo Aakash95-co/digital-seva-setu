@@ -258,11 +258,10 @@ def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_leve
                    ('Pending_Applications', 'Pending Applications', '#d62728')]
         trend_data = dfX.groupby('Month_Year')[
             ['application_Received', 'application_Disposed', 'application_Disposed_with_in_time',
-             'application_Disposed_Out_of_time', 'Pending_Applications', 'Efficiency_Percentage']].agg(
+             'application_Disposed_Out_of_time', 'Efficiency_Percentage']].agg(
             {'application_Received': 'sum', 'application_Disposed': 'sum',
              'application_Disposed_with_in_time': 'sum',
-             'application_Disposed_Out_of_time': 'sum', 'Pending_Applications': 'sum',
-             'Efficiency_Percentage': 'mean'}).reset_index()
+             'application_Disposed_Out_of_time': 'sum', 'Efficiency_Percentage': 'mean'}).reset_index()
         trend_data['Date'] = pd.to_datetime(trend_data['Month_Year'], format='%b-%Y', errors='coerce')
         trend_data = trend_data.sort_values('Date')
 
