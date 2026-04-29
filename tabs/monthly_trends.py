@@ -240,8 +240,7 @@ def generate_summary_cards(df1, df2, entity1, entity2, mode):
                 html.P(f"Received: {data['application_Received'].sum():,}"),
                 html.P(f"Disposed: {data['application_Disposed'].sum():,}"),
                 html.P(f"Out-of-Time: {data['application_Disposed_Out_of_time'].sum():,}"),
-                html.P(f"Pending: {data['Pending_Applications'].sum():,}"),
-                html.H5(f"Efficiency: {data['Efficiency_Percentage'].mean() if not data.empty else 0:.2f}%")
+                html.H5(f"Efficiency: {data['Efficiency_Percentage'].mean() if not data.empty else 0:.2f}%"),
             ])
         ]), md=6 if mode == 'comparison' else 12)
         cards.append(card)
@@ -255,7 +254,7 @@ def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_leve
                    ('application_Disposed', 'Applications Disposed', '#ff7f0e'),
                    ('application_Disposed_with_in_time', 'On-Time Disposal', '#2ca02c'),
                    ('application_Disposed_Out_of_time', 'Out-of-Time Disposal', '#8c564b'),
-                   ('Pending_Applications', 'Pending Applications', '#d62728')]
+                   ]
         trend_data = dfX.groupby('Month_Year')[
             ['application_Received', 'application_Disposed', 'application_Disposed_with_in_time',
              'application_Disposed_Out_of_time', 'Efficiency_Percentage']].agg(
