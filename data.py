@@ -32,6 +32,7 @@ def _load_mt(filename):
         'Received': 'application_Received', 'Disposed': 'application_Disposed',
         'Disposed_Out': 'application_Disposed_Out_of_time',
         'Disposed_with_in': 'application_Disposed_with_in_time',
+        'Pending': 'Pending_Applications',
     })
     d['Year'] = d['Year'].astype(str).str.replace('\ufeff', '', regex=False).str.strip()
     d['Year'] = pd.to_numeric(d['Year'], errors='coerce')
@@ -43,13 +44,13 @@ def _load_mt(filename):
         format='%Y-%m-%d'
     )
     d['Month_Year'] = d['Date'].dt.strftime('%b-%Y')
-    for col in ['application_Received', 'application_Disposed', 'application_Disposed_Out_of_time', 'application_Disposed_with_in_time']:
+    for col in ['application_Received', 'application_Disposed', 'application_Disposed_Out_of_time',
+                'application_Disposed_with_in_time', 'Pending_Applications']:
         d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0).astype(int)
     d['Efficiency_Percentage'] = d.apply(
         lambda row: (row['application_Disposed_with_in_time'] / row['application_Disposed'] * 100)
         if row['application_Disposed'] > 0 else 0, axis=1
     )
-    d['Pending_Applications'] = d['application_Received'] - d['application_Disposed']
     for col in ['District_name', 'Service_name', 'Office_name']:
         d[col] = d[col].astype(str).str.strip()
     return d
