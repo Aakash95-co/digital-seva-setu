@@ -135,15 +135,19 @@ def _build_caches(df):
         Total=('Total', 'sum'), OOT=('OOT', 'sum'))
     osm['OOT_Rate'] = _oot_pct(osm)
 
+    dsm = df.groupby(['District', 'Service', 'month_dt'], as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    dsm['OOT_Rate'] = _oot_pct(dsm)
+
     # add pre-computed year/month int columns for fast filtering
-    for frame in (om, dm, sm, ssm, osm):
+    for frame in (om, dm, sm, ssm, osm, dsm):
         frame['_y'] = frame['month_dt'].dt.year
         frame['_m'] = frame['month_dt'].dt.month
 
-    return om, dm, sm, ssm, osm
+    return om, dm, sm, ssm, osm, dsm
 
 
-_OM, _DM, _SM, _SSM, _OSM = _build_caches(_df)
+_OM, _DM, _SM, _SSM, _OSM, _DSM = _build_caches(_df)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -212,9 +216,13 @@ def _service_consistency(district, office, y, m):
     ].copy()
     if oh.empty:
         return {}
-    mg = oh.merge(
-        _SSM[['Service', 'month_dt', 'OOT_Rate']].rename(columns={'OOT_Rate': 'sa'}),
-        on=['Service', 'month_dt'], how='left')
+    # Compare against DISTRICT service avg (consistent with office streak benchmark)
+    dist_svc_avg = _DSM[
+        (_DSM['District'] == district) &
+        (_DSM['month_dt'] <= cutoff)
+    ][['Service', 'month_dt', 'OOT_Rate']].rename(columns={'OOT_Rate': 'sa'})
+    
+    mg = oh.merge(dist_svc_avg, on=['Service', 'month_dt'], how='left')
     mg['sa'] = mg['sa'].fillna(0)
     mg['bad'] = mg['OOT_Rate'] > mg['sa']
     mg.sort_values(['Service', 'month_dt'], inplace=True)
