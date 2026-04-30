@@ -39,6 +39,7 @@ def _build_data(fy):
     off_agg["OOT_Rate"] = (
         off_agg["OOT"] / off_agg["Received"].replace(0, np.nan) * 100
     ).fillna(0).round(1)
+    off_agg["Share"] = (off_agg["OOT"] / state_total_oot * 100).round(1)
     top5_offices = off_agg.nlargest(TOP_N, "OOT")["Office_Eng"].tolist()
 
     # ── Top 5 Services by raw OOT count ─────────────────────────────────────
@@ -50,6 +51,7 @@ def _build_data(fy):
     srv_agg["OOT_Rate"] = (
         srv_agg["OOT"] / srv_agg["Received"].replace(0, np.nan) * 100
     ).fillna(0).round(1)
+    srv_agg["Share"] = (srv_agg["OOT"] / state_total_oot * 100).round(1)
     top5_services = srv_agg.nlargest(TOP_N, "OOT")["Service_Eng"].tolist()
 
     # ── 5×5 Intersection ────────────────────────────────────────────────────
@@ -195,7 +197,7 @@ def _bar_fig(names, oot_vals, rates, color):
         y=labels,
         orientation="h",
         marker_color=color,
-        text=[f"{v:,}  ({r:.1f}%)" for v, r in zip(oot_vals, rates)],
+        text=[f"{v:,}  ({r:.1f}% of State OOT)" for v, r in zip(oot_vals, rates)],
         textposition="outside",
         cliponaxis=False,
         hovertemplate="<b>%{y}</b><br>OOT: %{x:,}<extra></extra>",
@@ -212,7 +214,7 @@ def _bar_fig(names, oot_vals, rates, color):
     return fig
 
 
-def _heatmap_fig(pivot_oot, pivot_rec):
+def _heatmap_fig(pivot_oot, pivot_rec, state_total_oot):
     y_labels_full = pivot_oot.index.tolist()
     x_labels_full = pivot_oot.columns.tolist()
     y_labels = [_shorten(o, 40) for o in y_labels_full]
@@ -228,12 +230,12 @@ def _heatmap_fig(pivot_oot, pivot_rec):
         for j, srv in enumerate(x_labels_full):
             cell_oot = int(pivot_oot.iloc[i, j])
             cell_rec = int(pivot_rec.iloc[i, j])
-            rate = round(cell_oot / cell_rec * 100, 1) if cell_rec > 0 else 0.0
+            share = round(cell_oot / state_total_oot * 100, 1)
             font_color = "white" if (cell_oot / max_val) > 0.45 else "#222222"
             annotations.append(dict(
                 x=x_labels[j],
                 y=y_labels[i],
-                text=f"<b>{cell_oot:,}</b><br>{rate:.1f}%",
+                text=f"<b>{cell_oot:,}</b><br>{share:.1f}%",
                 showarrow=False,
                 font=dict(size=10, color=font_color),
                 align="center",
@@ -245,7 +247,8 @@ def _heatmap_fig(pivot_oot, pivot_rec):
                 f"────────────────<br>"
                 f"<b>Received:</b> {cell_rec:,}<br>"
                 f"<b>OOT:</b> {cell_oot:,}<br>"
-                f"<b>OOT Rate:</b> {rate:.1f}%"
+                f"<b>% of State OOT:</b> {share:.1f}%<br>"
+                f"<b>OOT Rate:</b> {round(cell_oot/cell_rec*100,1) if cell_rec>0 else 0}%"
             )
         hover_text.append(row_hover)
 
@@ -316,7 +319,7 @@ def update_oot(fy):
     fig_off = _bar_fig(
         off_sorted.index.tolist(),
         off_sorted["OOT"].tolist(),
-        off_sorted["OOT_Rate"].tolist(),
+        off_sorted["Share"].tolist(),
         "#e63946",
     )
 
@@ -324,11 +327,11 @@ def update_oot(fy):
     fig_srv = _bar_fig(
         srv_sorted.index.tolist(),
         srv_sorted["OOT"].tolist(),
-        srv_sorted["OOT_Rate"].tolist(),
+        srv_sorted["Share"].tolist(),
         "#bd0026",
     )
 
-    fig_heat = _heatmap_fig(d["pivot_oot"], d["pivot_rec"])
+    fig_heat = _heatmap_fig(d["pivot_oot"], d["pivot_rec"], d["state_total_oot"])
 
     # Find the single worst cell for the claim
     flat = [
