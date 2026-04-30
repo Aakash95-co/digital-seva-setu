@@ -113,7 +113,7 @@ def _oot_pct(s):
 def _build_caches(df):
     if df.empty:
         empty = pd.DataFrame(columns=['OOT', 'Total', 'OOT_Rate', 'month_dt'])
-        return empty.copy(), empty.copy(), empty.copy(), empty.copy(), empty.copy()
+        return empty.copy(), empty.copy(), empty.copy(), empty.copy(), empty.copy(), empty.copy()
 
     om = df.groupby(['District', 'Office', 'month_dt'], as_index=False).agg(
         Total=('Total', 'sum'), OOT=('OOT', 'sum'))
@@ -216,14 +216,28 @@ def _service_consistency(district, office, y, m):
     ].copy()
     if oh.empty:
         return {}
-    # Compare against DISTRICT service avg (consistent with office streak benchmark)
-    dist_svc_avg = _DSM[
-        (_DSM['District'] == district) &
-        (_DSM['month_dt'] <= cutoff)
-    ][['Service', 'month_dt', 'OOT_Rate']].rename(columns={'OOT_Rate': 'sa'})
-    
-    mg = oh.merge(dist_svc_avg, on=['Service', 'month_dt'], how='left')
-    mg['sa'] = mg['sa'].fillna(0)
+
+    # District peer avg EXCLUDING this office — avoids self-contamination
+    peer_raw = _df[
+        (_df['District'] == district) &
+        (_df['Office'] != office) &          # ← key: exclude self
+        (_df['month_dt'] <= cutoff)
+    ].groupby(['Service', 'month_dt'], as_index=False).agg(
+        Total_p=('Total', 'sum'), OOT_p=('OOT', 'sum'))
+    peer_raw['sa_peer'] = np.where(
+        peer_raw['Total_p'] > 0,
+        (peer_raw['OOT_p'] / peer_raw['Total_p'] * 100).round(2),
+        np.nan)
+
+    # State avg as fallback when no peer exists in district for a service
+    state_avg = _SSM[_SSM['month_dt'] <= cutoff][['Service', 'month_dt', 'OOT_Rate']].rename(
+        columns={'OOT_Rate': 'sa_state'})
+
+    mg = oh.merge(peer_raw[['Service', 'month_dt', 'sa_peer']], on=['Service', 'month_dt'], how='left')
+    mg = mg.merge(state_avg, on=['Service', 'month_dt'], how='left')
+    # Use peer district avg if available, else fall back to state avg
+    mg['sa'] = mg['sa_peer'].where(mg['sa_peer'].notna(), mg['sa_state'].fillna(0))
+
     mg['bad'] = mg['OOT_Rate'] > mg['sa']
     mg.sort_values(['Service', 'month_dt'], inplace=True)
     out = {}
