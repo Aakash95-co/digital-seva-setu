@@ -131,7 +131,7 @@ def _build_caches(df):
         Total=('Total', 'sum'), OOT=('OOT', 'sum'))
     ssm['OOT_Rate'] = _oot_pct(ssm)
 
-    osm = df.groupby(['Office', 'Service', 'month_dt'], as_index=False).agg(
+    osm = df.groupby(['District', 'Office', 'Service', 'month_dt'], as_index=False).agg(
         Total=('Total', 'sum'), OOT=('OOT', 'sum'))
     osm['OOT_Rate'] = _oot_pct(osm)
 
@@ -203,9 +203,13 @@ def _compute_streaks(district, valid_offices, cutoff_ts):
     return streaks
 
 
-def _service_consistency(office, y, m):
+def _service_consistency(district, office, y, m):
     cutoff = pd.Timestamp(year=y, month=m, day=1)
-    oh = _OSM[(_OSM['Office'] == office) & (_OSM['month_dt'] <= cutoff)].copy()
+    oh = _OSM[
+        (_OSM['District'] == district) &
+        (_OSM['Office'] == office) &
+        (_OSM['month_dt'] <= cutoff)
+    ].copy()
     if oh.empty:
         return {}
     mg = oh.merge(
@@ -614,7 +618,7 @@ def _generate_pdf(year, month, min_c, max_c):
             t_total = svc_raw['Total'].sum()
             svc_raw['Share'] = svc_raw['OOT'].apply(
                 lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
-            svc_streaks = _service_consistency(row['Office'], year, month)
+            svc_streaks = _service_consistency(district, row['Office'], year, month)
             svc_raw = svc_raw.sort_values('OOT_Rate', ascending=False)
 
             svc_data = [[
@@ -1030,11 +1034,11 @@ def toggle_detail(n_list, is_open_list, district, period):
     snap['Share'] = snap['OOT'].apply(
         lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
     snap.sort_values('OOT_Rate', ascending=False, inplace=True)
-    svc_str = _service_consistency(office, y, m)
+    svc_streaks = _service_consistency(district, office, y, m)
 
     rows = []
     for _, sr in snap.iterrows():
-        st = svc_str.get(sr['Service'], 0)
+        st = svc_streaks.get(sr['Service'], 0)
         bad = sr['vs'] > 0
         conc = sr['Share'] >= 80
         bg = '#fff5f5' if (bad or conc) else '#f0fff4'
