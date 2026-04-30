@@ -1,3 +1,4 @@
+import calendar
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -6,7 +7,7 @@ import dash_bootstrap_components as dbc
 from app import app
 from data import FY_DATA
 
-TOP_N = 5  # Always 5 offices × 5 services
+_MONTH_ABR = {v: k for k, v in enumerate(calendar.month_abbr) if v}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,12 +26,22 @@ def _shorten(label, n=35):
     return label if len(label) <= n else label[: n - 1] + "…"
 
 
-def _build_data(fy):
+def _build_data(fy, month="ALL", top_n=5):
+    top_n = int(top_n or 5)
     df = _prep_df(FY_DATA[fy]["df"])
     fy_label = FY_DATA[fy]["label"]
+
+    # ── Month filter ─────────────────────────────────────────────────────────
+    month_label = "All Months"
+    if month and month != "ALL":
+        mn = _MONTH_ABR.get(month.split("-")[0], 0)
+        if mn:
+            df = df[df["Mn"] == mn]
+            month_label = month
+
     state_total_oot = max(int(df["Disposed_Out"].sum()), 1)
 
-    # ── Top 5 Offices by raw OOT count ──────────────────────────────────────
+    # ── Top N Offices by raw OOT count ──────────────────────────────────────
     off_agg = (
         df.groupby("Office_Eng")
         .agg(OOT=("Disposed_Out", "sum"), Received=("Received", "sum"))
@@ -40,9 +51,9 @@ def _build_data(fy):
         off_agg["OOT"] / off_agg["Received"].replace(0, np.nan) * 100
     ).fillna(0).round(1)
     off_agg["Share"] = (off_agg["OOT"] / state_total_oot * 100).round(1)
-    top5_offices = off_agg.nlargest(TOP_N, "OOT")["Office_Eng"].tolist()
+    top_offices = off_agg.nlargest(top_n, "OOT")["Office_Eng"].tolist()
 
-    # ── Top 5 Services by raw OOT count ─────────────────────────────────────
+    # ── Top N Services by raw OOT count ─────────────────────────────────────
     srv_agg = (
         df.groupby("Service_Eng")
         .agg(OOT=("Disposed_Out", "sum"), Received=("Received", "sum"))
@@ -52,11 +63,11 @@ def _build_data(fy):
         srv_agg["OOT"] / srv_agg["Received"].replace(0, np.nan) * 100
     ).fillna(0).round(1)
     srv_agg["Share"] = (srv_agg["OOT"] / state_total_oot * 100).round(1)
-    top5_services = srv_agg.nlargest(TOP_N, "OOT")["Service_Eng"].tolist()
+    top_services = srv_agg.nlargest(top_n, "OOT")["Service_Eng"].tolist()
 
-    # ── 5×5 Intersection ────────────────────────────────────────────────────
+    # ── NxN Intersection ────────────────────────────────────────────────────
     base_f = df[
-        df["Office_Eng"].isin(top5_offices) & df["Service_Eng"].isin(top5_services)
+        df["Office_Eng"].isin(top_offices) & df["Service_Eng"].isin(top_services)
     ]
     cell = (
         base_f.groupby(["Office_Eng", "Service_Eng"])
@@ -65,24 +76,24 @@ def _build_data(fy):
     )
     pivot_oot = (
         cell.pivot(index="Office_Eng", columns="Service_Eng", values="OOT")
-        .reindex(index=top5_offices, columns=top5_services)
+        .reindex(index=top_offices, columns=top_services)
         .fillna(0)
     )
     pivot_rec = (
         cell.pivot(index="Office_Eng", columns="Service_Eng", values="Received")
-        .reindex(index=top5_offices, columns=top5_services)
+        .reindex(index=top_offices, columns=top_services)
         .fillna(0)
     )
 
     off_top = (
-        off_agg[off_agg["Office_Eng"].isin(top5_offices)]
+        off_agg[off_agg["Office_Eng"].isin(top_offices)]
         .set_index("Office_Eng")
-        .reindex(top5_offices)
+        .reindex(top_offices)
     )
     srv_top = (
-        srv_agg[srv_agg["Service_Eng"].isin(top5_services)]
+        srv_agg[srv_agg["Service_Eng"].isin(top_services)]
         .set_index("Service_Eng")
-        .reindex(top5_services)
+        .reindex(top_services)
     )
 
     matrix_oot = int(pivot_oot.values.sum())
@@ -94,7 +105,9 @@ def _build_data(fy):
         state_total_oot=state_total_oot,
         matrix_oot=matrix_oot, matrix_pct=matrix_pct,
         fy_label=fy_label,
-        top5_offices=top5_offices, top5_services=top5_services,
+        top5_offices=top_offices, top5_services=top_services,
+        top_n=top_n,
+        month_label=month_label,
     )
 
 
@@ -107,7 +120,7 @@ layout = dbc.Container([
     html.Div([
         html.H2("🔥 Out-of-Time Drilldown", style={"color": "white", "margin": 0, "fontWeight": "600"}),
         html.P(
-            "Top 5 Offices & Top 5 Services driving Out-of-Time cases — and their intersection.",
+            "Top N Offices & Top N Services driving Out-of-Time cases — and their intersection.",
             style={"color": "#ffcccc", "margin": "6px 0 0 0", "fontSize": "0.95rem"}
         ),
     ], style={
@@ -115,6 +128,39 @@ layout = dbc.Container([
         "padding": "22px 30px", "borderRadius": "12px", "marginBottom": "24px",
         "boxShadow": "0 4px 12px rgba(0,0,0,0.15)"
     }),
+
+    # ── Filters ─────────────────────────────────────────────────────────────
+    dbc.Card([
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([
+                    html.Label("📅 Month", className="fw-semibold text-secondary mb-1",
+                               style={"fontSize": "0.82rem"}),
+                    dcc.Dropdown(
+                        id="oot-month",
+                        value="ALL",
+                        clearable=False,
+                        style={"fontSize": "0.85rem"},
+                    ),
+                ], md=5),
+                dbc.Col([
+                    html.Label("🔢 Matrix Size", className="fw-semibold text-secondary mb-1",
+                               style={"fontSize": "0.82rem"}),
+                    dcc.Input(
+                        id="oot-top-n",
+                        type="number",
+                        value=5,
+                        min=2,
+                        max=20,
+                        step=1,
+                        debounce=True,
+                        style={"width": "80px", "padding": "6px", "borderRadius": "4px",
+                               "border": "1px solid #ccc", "fontSize": "0.9rem"},
+                    ),
+                ], md=5),
+            ], align="center"),
+        ], style={"padding": "12px 20px"}),
+    ], className="border-0 shadow-sm mb-4", style={"borderRadius": "10px", "backgroundColor": "#fff"}),
 
     # Status bar
     html.Div(id="oot-status-bar", className="mb-4"),
@@ -124,7 +170,9 @@ layout = dbc.Container([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(
-                    html.H6("🏢 Top 5 Offices by OOT Volume", className="mb-0 fw-bold text-dark"),
+                    html.H6(id="oot-office-bar-title",
+                            children="🏢 Top Offices by OOT Volume",
+                            className="mb-0 fw-bold text-dark"),
                     style={"backgroundColor": "#fff5f5", "borderBottom": "2px solid #f8d7da"}
                 ),
                 dbc.CardBody(
@@ -143,7 +191,9 @@ layout = dbc.Container([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(
-                    html.H6("⚙️ Top 5 Services by OOT Volume", className="mb-0 fw-bold text-dark"),
+                    html.H6(id="oot-service-bar-title",
+                            children="⚙️ Top Services by OOT Volume",
+                            className="mb-0 fw-bold text-dark"),
                     style={"backgroundColor": "#fff5f5", "borderBottom": "2px solid #f8d7da"}
                 ),
                 dbc.CardBody(
@@ -160,13 +210,15 @@ layout = dbc.Container([
         ], md=6),
     ], className="mb-4"),
 
-    # ── 5×5 Annotated Heatmap ────────────────────────────────────────────────
+    # ── NxN Annotated Heatmap ────────────────────────────────────────────────
     dbc.Card([
         dbc.CardHeader(
             html.Div([
-                html.H5("🔥 5 × 5 Intersection Heatmap", className="mb-0 fw-bold text-dark d-inline"),
+                html.H5(id="oot-heatmap-title",
+                        children="🔥 5 × 5 Intersection Heatmap",
+                        className="mb-0 fw-bold text-dark d-inline"),
                 html.Span(
-                    " — Each cell shows OOT count (bold) + OOT rate %",
+                    " — Each cell shows OOT count (bold) + % of State OOT",
                     style={"fontSize": "0.85rem", "color": "#6c757d", "marginLeft": "10px"}
                 ),
             ]),
@@ -183,6 +235,9 @@ layout = dbc.Container([
             )
         ),
     ], className="border-0 shadow-sm", style={"borderRadius": "12px", "overflow": "hidden"}),
+
+    # ── Matrix Summary ───────────────────────────────────────────────────────
+    html.Div(id="oot-matrix-summary", className="mt-3"),
 
 ], fluid=True, style={"padding": "24px", "backgroundColor": "#f8f9fa"})
 
@@ -231,6 +286,7 @@ def _heatmap_fig(pivot_oot, pivot_rec, state_total_oot):
             cell_oot = int(pivot_oot.iloc[i, j])
             cell_rec = int(pivot_rec.iloc[i, j])
             share = round(cell_oot / state_total_oot * 100, 1)
+            oot_rate = round(cell_oot / cell_rec * 100, 1) if cell_rec > 0 else 0.0
             font_color = "white" if (cell_oot / max_val) > 0.45 else "#222222"
             annotations.append(dict(
                 x=x_labels[j],
@@ -248,7 +304,7 @@ def _heatmap_fig(pivot_oot, pivot_rec, state_total_oot):
                 f"<b>Received:</b> {cell_rec:,}<br>"
                 f"<b>OOT:</b> {cell_oot:,}<br>"
                 f"<b>% of State OOT:</b> {share:.1f}%<br>"
-                f"<b>OOT Rate:</b> {round(cell_oot/cell_rec*100,1) if cell_rec>0 else 0}%"
+                f"<b>OOT Rate:</b> {oot_rate:.1f}%"
             )
         hover_text.append(row_hover)
 
@@ -302,17 +358,40 @@ def _heatmap_fig(pivot_oot, pivot_rec, state_total_oot):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CALLBACK
+# CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
+
+# -- Populate month dropdown when FY changes --
+@app.callback(
+    Output("oot-month", "options"),
+    Output("oot-month", "value"),
+    Input("fy-store", "data"),
+)
+def update_month_options(fy):
+    opts = [{"label": "All Months", "value": "ALL"}]
+    for o in FY_DATA[fy]["month_options"]:
+        if o["value"] != "ALL_MONTHS":
+            opts.append({"label": o["label"], "value": o["value"]})
+    return opts, "ALL"
+
+
+# -- Main analysis --
 @app.callback(
     Output("oot-office-bar", "figure"),
     Output("oot-service-bar", "figure"),
     Output("oot-heatmap", "figure"),
     Output("oot-status-bar", "children"),
+    Output("oot-heatmap-title", "children"),
+    Output("oot-office-bar-title", "children"),
+    Output("oot-service-bar-title", "children"),
+    Output("oot-matrix-summary", "children"),   # ← add this line
     Input("fy-store", "data"),
+    Input("oot-month", "value"),
+    Input("oot-top-n", "value"),
 )
-def update_oot(fy):
-    d = _build_data(fy)
+def update_oot(fy, month, top_n):
+    top_n = int(top_n or 5)
+    d = _build_data(fy, month=month or "ALL", top_n=top_n)
 
     # Sort ascending so worst appears at top of horizontal bar chart
     off_sorted = d["off_top"].sort_values("OOT", ascending=True)
@@ -333,7 +412,7 @@ def update_oot(fy):
 
     fig_heat = _heatmap_fig(d["pivot_oot"], d["pivot_rec"], d["state_total_oot"])
 
-    # Find the single worst cell for the claim
+    # Find the single worst cell
     flat = [
         (off, srv, int(d["pivot_oot"].loc[off, srv]))
         for off in d["top5_offices"]
@@ -343,12 +422,15 @@ def update_oot(fy):
     top1_off, top1_srv, top1_oot = flat[0]
     top1_pct = round(top1_oot / d["state_total_oot"] * 100, 1)
 
+    n = top_n
     status = dbc.Alert([
         html.B(f"📅 {d['fy_label']}"),
         "  |  ",
+        html.B("Period: "), d["month_label"],
+        "  |  ",
         html.B("State Total OOT: "), f"{d['state_total_oot']:,}",
         "  |  ",
-        html.B("Top 5×5 Matrix: "),
+        html.B(f"Top {n}×{n} Matrix: "),
         html.Span(
             f"{d['matrix_oot']:,} cases ({d['matrix_pct']}% of state OOT)",
             style={"color": "#8b0000", "fontWeight": "600"}
@@ -362,4 +444,21 @@ def update_oot(fy):
     ], color="danger", className="py-2 px-3 border-0 shadow-sm rounded-3",
        style={"backgroundColor": "#f8d7da", "fontSize": "0.9rem"})
 
-    return fig_off, fig_srv, fig_heat, status
+    heatmap_title = f"🔥 {n} × {n} Intersection Heatmap"
+    office_bar_title = f"🏢 Top {n} Offices by OOT Volume"
+    service_bar_title = f"⚙️ Top {n} Services by OOT Volume"
+
+    n_cells = top_n * top_n
+    summary = dbc.Alert([
+        html.Span("📊 "),
+        html.B(f"{n}×{n} = {n_cells} entities"),
+        f" (Top {n} Offices × Top {n} Services) account for ",
+        html.Span(
+            f"{d['matrix_pct']}% of total State OOT",
+            style={"color": "#8b0000", "fontWeight": "700", "fontSize": "1.05rem"}
+        ),
+        f"  —  {d['matrix_oot']:,} out of {d['state_total_oot']:,} cases",
+    ], color="warning", className="py-2 px-4 shadow-sm rounded-3 text-center",
+   style={"backgroundColor": "#fff3cd", "border": "1px solid #ffc107", "fontSize": "0.95rem"})
+
+    return fig_off, fig_srv, fig_heat, status, heatmap_title, office_bar_title, service_bar_title, summary
