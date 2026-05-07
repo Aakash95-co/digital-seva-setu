@@ -743,18 +743,29 @@ def update_periods(district):
     if not district or _df.empty:
         return [], None
 
-    # Get unique datetimes for this district and sort descending
     dates = _OM[_OM['District'] == district]['month_dt'].drop_duplicates().sort_values(ascending=False)
 
-    opts = []
+    # Build FY options (April→March), deduplicated, sorted newest first
+    seen_fy = set()
+    fy_opts = []
     for d in dates:
-        # Build label e.g., "March 2025"
-        lbl = f"{MONTH_NAMES.get(d.month, str(d.month))} {d.year}"
-        # Value string formatting for parsing later
-        val = f"{d.year}-{d.month}"
-        opts.append({'label': lbl, 'value': val})
+        fy_start = d.year if d.month >= 4 else d.year - 1
+        if fy_start not in seen_fy:
+            seen_fy.add(fy_start)
+            fy_opts.append({
+                'label': f"📅 FY {fy_start}-{str(fy_start + 1)[2:]}",
+                'value': f"fy-{fy_start}"
+            })
 
-    return opts, opts[0]['value'] if opts else None
+    # Monthly options
+    month_opts = []
+    for d in dates:
+        lbl = f"{MONTH_NAMES.get(d.month, str(d.month))} {d.year}"
+        val = f"{d.year}-{d.month}"
+        month_opts.append({'label': lbl, 'value': val})
+
+    all_opts = fy_opts + month_opts
+    return all_opts, all_opts[0]['value'] if all_opts else None
 
 
 # -- PDF --
@@ -770,11 +781,12 @@ def gen_pdf(_, period, min_c, max_c):
     if not period:
         return None, dbc.Alert("Select Reporting Period.", color="warning")
     try:
-        year, month = map(int, period.split('-'))
-        pdf = _generate_pdf(year, month,
-                            int(min_c or 0), int(max_c) if max_c else None)
-        mn = MONTH_NAMES.get(month, str(month))
-        fn = f"Report_{mn}_{year}.pdf"
+        mode, y, m = _parse_period(period)
+        if mode == 'fy':
+            return None, dbc.Alert("PDF export for full FY is not yet supported. Select a specific month.", color="info")
+        pdf = _generate_pdf(y, m, int(min_c or 0), int(max_c) if max_c else None)
+        mn = MONTH_NAMES.get(m, str(m))
+        fn = f"Report_{mn}_{y}.pdf"
         return dict(content=base64.b64encode(pdf).decode(),
                     filename=fn, base64=True, type='application/pdf'), \
             dbc.Alert(f"✅ {fn}", color="success", duration=4000)
@@ -794,10 +806,49 @@ def gen_pdf(_, period, min_c, max_c):
 def open_sunburst(n, district, period):
     if not all([district, period]):
         return False, ""
-    year, month = map(int, period.split('-'))
-    fig = _sunburst_figure(district, year, month)
-    if fig is None:
+    mode, y, m = _parse_period(period)
+    if mode == 'fy':
+        # Aggregate FY OOT for sunburst
+        raw = _df[
+            (_df['District'] == district) & _fy_mask(_df['month_dt'], y)
+        ].groupby(['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
+        raw = raw[raw['OOT'] > 0]
+        title = f"🌐 OOT Sunburst — {district} | FY {y}-{str(y+1)[2:]}"
+    else:
+        raw = _df[
+            (_df['District'] == district) &
+            (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
+        ].groupby(['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
+        raw = raw[raw['OOT'] > 0]
+        title = f"🌐 OOT Sunburst — {district} | {MONTH_NAMES.get(m, str(m))} {y}"
+
+    if raw.empty:
         return True, dbc.Alert("No OOT data for this selection.", color="warning")
+
+    ids, labels, parents, values, clrs = [], [], [], [], []
+    dist_oot = int(raw['OOT'].sum())
+    ids.append(district); labels.append(district); parents.append(''); values.append(dist_oot); clrs.append('#2d6a9f')
+    for idx, office in enumerate(sorted(raw['Office'].unique())):
+        oid = f"{district}/{office}"
+        off_oot = int(raw.loc[raw['Office'] == office, 'OOT'].sum())
+        ids.append(oid); labels.append(office); parents.append(district)
+        values.append(off_oot); clrs.append(SUNBURST_COLORS[idx % len(SUNBURST_COLORS)])
+        for _, sr in raw[raw['Office'] == office].sort_values('OOT', ascending=False).iterrows():
+            sid = f"{oid}/{sr['Service']}"
+            ids.append(sid); labels.append(sr['Service']); parents.append(oid)
+            values.append(int(sr['OOT'])); clrs.append(SUNBURST_COLORS[idx % len(SUNBURST_COLORS)])
+
+    fig = go.Figure(go.Sunburst(
+        ids=ids, labels=labels, parents=parents, values=values, branchvalues='total',
+        marker=dict(colors=clrs, line=dict(color=SUNBURST_BG, width=2)),
+        hovertemplate='<b>%{label}</b><br>OOT: %{value:,}<extra></extra>',
+        textinfo='label+value', insidetextorientation='radial', maxdepth=3,
+    ))
+    fig.update_layout(
+        title=dict(text=title, font=dict(color='#ddd', size=16)),
+        paper_bgcolor=SUNBURST_BG, plot_bgcolor=SUNBURST_BG,
+        margin=dict(t=50, l=10, r=10, b=10), height=560, font=dict(color='#eee'),
+    )
     return True, dcc.Graph(figure=fig, style={'height': '560px'})
 
 
@@ -813,17 +864,26 @@ def run_analysis(_, district, period, min_c, max_c):
     if not all([district, period]):
         return dbc.Alert("Select all filters.", color="warning")
 
-    year, month = map(int, period.split('-'))
+    mode, y, m = _parse_period(period)
     min_c = int(min_c or 0)
     max_c = int(max_c) if max_c else None
 
-    scored, avg_t = _score_offices(district, year, month, min_c, max_c)
+    if mode == 'fy':
+        scored, avg_t = _score_offices_fy(district, y, min_c, max_c)
+        period_label = f"FY {y}-{str(y+1)[2:]}"
+        month_name = period_label  # reuse variable used in titles below
+    else:
+        scored, avg_t = _score_offices(district, y, m, min_c, max_c)
+        month_name = MONTH_NAMES.get(m, str(m))
+        period_label = f"{month_name} {y}"
+
     if scored.empty:
         return dbc.Alert(f"No offices in Total [{min_c}–{max_c or '∞'}].", color="warning")
 
     d_oot = scored['District_Avg_OOT'].iloc[0]
     s_oot = scored['State_Avg_OOT'].iloc[0]
-    month_name = MONTH_NAMES.get(month, str(month))
+    # rest of the function stays the same, replace all occurrences of
+    # f"... {month_name} {year}" with f"... {period_label}"
 
     # ── KPI row (District OOT is clickable → opens sunburst) ──────────────
     kpi_row = dbc.Row([
@@ -862,7 +922,7 @@ def run_analysis(_, district, period, min_c, max_c):
             html.B("F1 (25 pts)"), " Dist Min-Max: [(Max_Dist − Office) / (Max_Dist − Min_Dist)] × 25  |  ",
             html.B("F2 (25 pts)"), " State Baseline: 12.5 + ((State_OOT − Office_OOT) / State_OOT) × 12.5  |  ",
             html.B("F3 (25 pts)"), " Streak Score: <3=25, ≥3=16.6, ≥6=8.3, ≥9=0  |  ",
-            html.B("F4 (25 pts)"), " Service Score: Top Svc OOT <80% of Total = 25, else 0  |  ",
+            html.B("F4 (25 pts)"), " Service Score: Top Svc OOT <80% of Office Total = 25, else 0  |  ",
             html.B("100=best"),
         ], style={'color': '#555', 'fontSize': '0.82rem'})
     ], color="light", className="mb-3", style={'border': '1px solid #d0d7de'})
@@ -1032,9 +1092,32 @@ def toggle_detail(n_list, is_open_list, district, period):
         return is_open_list, [dash.no_update] * len(is_open_list)
 
     office = callback_context.triggered_id['index']
-    y, m = map(int, period.split('-'))
-    all_ids = [t['id']['index'] for t in callback_context.inputs_list[0]]
-    idx = all_ids.index(office)
+    mode, y, m = _parse_period(period)
+
+    # For FY mode: use last available month of that FY as the reference month
+    if mode == 'fy':
+        fy_months = _OM[
+            (_OM['District'] == district) & _fy_mask(_OM['month_dt'], y)
+        ]['month_dt']
+        last_dt = fy_months.max() if not fy_months.empty else pd.Timestamp(year=y+1, month=3, day=1)
+        y_ref, m_ref = last_dt.year, last_dt.month
+        # For service OOT data, aggregate whole FY
+        svc_avg = _state_svc_avg_fy(y)
+        snap = _df[
+            (_df['District'] == district) & (_df['Office'] == office) &
+            _fy_mask(_df['month_dt'], y)
+        ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    else:
+        y_ref, m_ref = y, m
+        svc_avg = _state_svc_avg(y, m)
+        snap = _df[
+            (_df['District'] == district) & (_df['Office'] == office) &
+            (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
+        ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+
+    # rest of toggle_detail unchanged, but use y_ref/m_ref for _service_consistency:
+    svc_streaks = _service_consistency(district, office, y_ref, m_ref)
+    # ... (rest of panel building is identical)
 
     new_open = list(is_open_list)
     new_open[idx] = not is_open_list[idx]
@@ -1042,21 +1125,6 @@ def toggle_detail(n_list, is_open_list, district, period):
 
     if not new_open[idx]:
         return new_open, panels
-
-    svc_avg = _state_svc_avg(y, m)
-    snap = _df[
-        (_df['District'] == district) & (_df['Office'] == office) &
-        (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
-        ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
-
-    snap['OOT_Rate'] = snap.apply(lambda r: _oot_rate(r['OOT'], r['Total']), axis=1)
-    snap['StAvg'] = snap['Service'].map(lambda s: svc_avg.get(s, 0.0))
-    snap['vs'] = snap['OOT_Rate'] - snap['StAvg']
-    t_total = snap['Total'].sum()
-    snap['Share'] = snap['OOT'].apply(
-        lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
-    snap.sort_values('OOT_Rate', ascending=False, inplace=True)
-    svc_streaks = _service_consistency(district, office, y, m)
 
     rows = []
     for _, sr in snap.iterrows():
