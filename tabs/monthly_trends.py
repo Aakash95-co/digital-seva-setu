@@ -16,7 +16,8 @@ layout = dbc.Container([
                 dbc.RadioItems(
                     id='analysis-mode-selector',
                     options=[{'label': 'Single Entity', 'value': 'single'},
-                             {'label': 'Comparison', 'value': 'comparison'}],
+                             {'label': 'Comparison', 'value': 'comparison'},
+                             {'label': 'Year on Year', 'value': 'yoy'}],
                     value='single', inline=True
                 )
             ], md=6),
@@ -87,17 +88,23 @@ layout = dbc.Container([
 @app.callback([Output('single-entity-wrapper', 'style'), Output('comparison-entity-wrapper', 'style')],
               Input('analysis-mode-selector', 'value'))
 def toggle_entity_selectors(mode):
-    if mode == 'single': return {'display': 'block'}, {'display': 'none'}
+    if mode in ('single', 'yoy'): return {'display': 'block'}, {'display': 'none'}
     return {'display': 'none'}, {'display': 'block'}
 
 
 @app.callback([Output('single-entity-dropdown', 'options'), Output('entity1-dropdown', 'options'),
                Output('entity2-dropdown', 'options')],
-              [Input('primary-level', 'value'), Input('mt-fy-selector', 'value')])
-def update_entity_options(primary_level, fy_local):
-    df_mt = FY_DATA[fy_local]['df_mt']
+              [Input('primary-level', 'value'), Input('mt-fy-selector', 'value'),
+               Input('analysis-mode-selector', 'value')])
+def update_entity_options(primary_level, fy_local, mode):
     col_map = {'district': 'District_name', 'service': 'Service_name', 'office': 'Office_name'}
-    entities = sorted(df_mt[col_map[primary_level]].unique())
+    col = col_map[primary_level]
+    if mode == 'yoy':
+        entities = sorted(
+            set(FY_DATA['2425']['df_mt'][col].unique()) | set(FY_DATA['2526']['df_mt'][col].unique())
+        )
+    else:
+        entities = sorted(FY_DATA[fy_local]['df_mt'][col].unique())
     options = [{'label': e, 'value': e} for e in entities]
     return options, options, options
 
@@ -206,7 +213,22 @@ def update_dashboard(mode, fy_local, single_entity, entity1, entity2, drill_leve
             df_target = df_target[df_target['District_name'] == district_filter]
         return df_target
 
-    if mode == 'single':
+    if mode == 'yoy':
+        if not single_entity:
+            return dbc.Alert("Please select an entity to analyze.", color="info"), None, None, None
+        df1_yoy = FY_DATA['2425']['df_mt']
+        df2_yoy = FY_DATA['2526']['df_mt']
+        months_2425 = FY_DATA['2425']['all_months']
+        months_2526 = FY_DATA['2526']['all_months']
+        df1_yoy = filter_df(df1_yoy[(df1_yoy['Month_Year'].isin(months_2425)) & (df1_yoy[primary_col] == single_entity)])
+        df2_yoy = filter_df(df2_yoy[(df2_yoy['Month_Year'].isin(months_2526)) & (df2_yoy[primary_col] == single_entity)])
+        return (
+            dbc.Alert(f"Year on Year: {single_entity} — FY 2024-25 vs FY 2025-26", color="success"),
+            generate_summary_cards(df1_yoy, df2_yoy, 'FY 2024-25', 'FY 2025-26', 'comparison'),
+            generate_main_visuals(df1_yoy, df2_yoy, 'FY 2024-25', 'FY 2025-26', months_2425, 'comparison', primary_level, FY_DATA['2425']['df_mt']),
+            html.P("Drill-down selections act as filters only.", className="text-muted")
+        )
+    elif mode == 'single':
         if not single_entity: return dbc.Alert("Please select an entity to analyze.", color="info"), None, None, None
         df1 = filter_df(df_mt[(df_mt['Month_Year'].isin(months)) & (df_mt[primary_col] == single_entity)])
         if df1.empty: return dbc.Alert(f"Displaying analysis for: {single_entity}", color="success"), dbc.Alert(
@@ -293,3 +315,52 @@ def generate_main_visuals(df1, df2, entity1, entity2, months, mode, primary_leve
 
     if mode == 'single': return dbc.Row([dbc.Col(build_trend_figs(df1, entity1), md=12)])
     return dbc.Row([dbc.Col(build_trend_figs(df1, entity1), md=6), dbc.Col(build_trend_figs(df2, entity2), md=6)])
+
+
+def generate_yoy_visuals(df1, df2, entity_label):
+    FISCAL_MONTH_ORDER = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar']
+    month_index = {m: i for i, m in enumerate(FISCAL_MONTH_ORDER)}
+
+    def make_trend(df):
+        if df.empty:
+            return pd.DataFrame(columns=['Fiscal_Month', 'application_Received', 'application_Disposed',
+                                         'application_Disposed_Out_of_time', 'application_Disposed_with_in_time',
+                                         'Efficiency_Percentage'])
+        td = df.groupby('Month_Year')[['application_Received', 'application_Disposed',
+                                       'application_Disposed_Out_of_time',
+                                       'application_Disposed_with_in_time']].sum().reset_index()
+        td['Fiscal_Month'] = pd.to_datetime(td['Month_Year'], format='%b-%Y', errors='coerce').dt.strftime('%b')
+        td['Efficiency_Percentage'] = (
+            td['application_Disposed_with_in_time'] / td['application_Disposed'] * 100
+        ).where(td['application_Disposed'] > 0, 0)
+        td['_order'] = td['Fiscal_Month'].map(month_index)
+        return td.sort_values('_order')
+
+    td1 = make_trend(df1)
+    td2 = make_trend(df2)
+
+    metrics = [
+        ('application_Received', 'Applications Received'),
+        ('application_Disposed', 'Applications Disposed'),
+        ('application_Disposed_Out_of_time', 'Out-of-Time Disposal'),
+        ('Efficiency_Percentage', 'Efficiency %'),
+    ]
+
+    figs = []
+    for col, title in metrics:
+        fig = go.Figure()
+        if not td1.empty:
+            fig.add_trace(go.Bar(x=td1['Fiscal_Month'], y=td1[col], name='FY 2024-25',
+                                  marker_color=COLOR_PALETTE['primary']))
+        if not td2.empty:
+            fig.add_trace(go.Bar(x=td2['Fiscal_Month'], y=td2[col], name='FY 2025-26',
+                                  marker_color=COLOR_PALETTE['secondary']))
+        fig.update_layout(
+            title=f"{entity_label} — {title} (Year on Year)",
+            template="plotly_white", barmode='group',
+            xaxis={'title': 'Fiscal Month', 'categoryorder': 'array', 'categoryarray': FISCAL_MONTH_ORDER},
+            yaxis_title=title
+        )
+        figs.append(dcc.Graph(figure=fig, style={'marginBottom': '24px'}))
+
+    return html.Div(figs)
