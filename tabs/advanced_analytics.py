@@ -401,6 +401,88 @@ def _reasons(row):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# FINANCIAL YEAR HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+def _parse_period(period):
+    """Parse period string. Returns (mode, year, month_or_none)."""
+    if not period:
+        return 'month', None, None
+    if period.startswith('fy-'):
+        return 'fy', int(period[3:]), None
+    parts = period.split('-')
+    return 'month', int(parts[0]), int(parts[1])
+
+
+def _fy_mask(series, fy_start):
+    """Boolean mask for FY: April fy_start to March fy_start+1."""
+    return (
+        ((series.dt.year == fy_start) & (series.dt.month >= 4)) |
+        ((series.dt.year == fy_start + 1) & (series.dt.month <= 3))
+    )
+
+
+def _state_svc_avg_fy(fy_start):
+    """State-level service OOT averages aggregated for a full financial year."""
+    mask = _fy_mask(_SSM['month_dt'], fy_start)
+    s = _SSM[mask].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    s['OOT_Rate'] = np.where(s['Total'] > 0, (s['OOT'] / s['Total'] * 100).round(2), 0.0)
+    return dict(zip(s['Service'], s['OOT_Rate']))
+
+
+def _score_offices_fy(district, fy_start, min_c, max_c):
+    """Score offices for a full financial year (April fy_start to March fy_start+1)."""
+    dist_mask = _fy_mask(_df['month_dt'], fy_start) & (_df['District'] == district)
+    agg = _df[dist_mask].groupby('Office', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    if agg.empty:
+        return pd.DataFrame(), 0.0
+    avg_total = round(agg['Total'].mean(), 2)
+    agg['OOT_Rate'] = np.where(agg['Total'] > 0, (agg['OOT'] / agg['Total'] * 100).round(2), 0.0)
+    if min_c > 0:
+        agg = agg[agg['Total'] >= min_c]
+    if max_c and max_c > 0:
+        agg = agg[agg['Total'] <= max_c]
+    agg = agg.reset_index(drop=True)
+    if agg.empty:
+        return pd.DataFrame(), avg_total
+
+    offices = agg['Office'].tolist()
+    d_rows = _DM[_fy_mask(_DM['month_dt'], fy_start) & (_DM['District'] == district)]
+    d_oot = round(d_rows['OOT'].sum() / d_rows['Total'].sum() * 100, 2) if d_rows['Total'].sum() > 0 else 0.0
+    s_rows = _SM[_fy_mask(_SM['month_dt'], fy_start)]
+    s_oot = round(s_rows['OOT'].sum() / s_rows['Total'].sum() * 100, 2) if s_rows['Total'].sum() > 0 else 0.0
+
+    d_min, d_max = agg['OOT_Rate'].min(), agg['OOT_Rate'].max()
+    agg['F1'] = ((d_max - agg['OOT_Rate']) / (d_max - d_min) * 25).round(2) if d_max > d_min else 25.0
+    if s_oot > 0:
+        agg['F2'] = (12.5 + ((s_oot - agg['OOT_Rate']) / s_oot * 12.5)).clip(0, 25).round(2)
+    else:
+        agg['F2'] = np.where(agg['OOT_Rate'] <= 0, 25.0, 0.0)
+
+    fy_months = _OM[(_OM['District'] == district) & _fy_mask(_OM['month_dt'], fy_start)]['month_dt']
+    cutoff_ts = fy_months.max() if not fy_months.empty else pd.Timestamp(year=fy_start + 1, month=3, day=1)
+    streaks = _compute_streaks(district, offices, cutoff_ts)
+    agg['Streak'] = agg['Office'].map(streaks).fillna(0).astype(int)
+    agg['F3'] = agg['Streak'].apply(lambda s: 0.0 if s >= 9 else 8.33 if s >= 6 else 16.67 if s >= 3 else 25.0)
+
+    svc_agg = _df[dist_mask & _df['Office'].isin(offices)].groupby(
+        ['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
+    top_svc_oot = svc_agg.groupby('Office')['OOT'].max().to_dict()
+    agg['Top_Svc_OOT'] = agg['Office'].map(top_svc_oot).fillna(0)
+    agg['Top_Svc_Share'] = np.where(agg['OOT'] > 0, agg['Top_Svc_OOT'] / agg['OOT'], 0)
+    agg['F4'] = np.where((agg['Top_Svc_Share'] >= 0.80) | (agg['OOT'] == 0), 25.0, 0.0)
+
+    agg['Composite_Score'] = (agg['F1'] + agg['F2'] + agg['F3'] + agg['F4']).round(2)
+    c_min, c_max = agg['Composite_Score'].min(), agg['Composite_Score'].max()
+    if c_max > c_min:
+        agg['Scaled_Score'] = ((agg['Composite_Score'] - c_min) / (c_max - c_min) * 100.0).round(2)
+    else:
+        agg['Scaled_Score'] = 100.0
+    agg['District_Avg_OOT'] = d_oot
+    agg['State_Avg_OOT'] = s_oot
+    return agg.sort_values('Composite_Score').reset_index(drop=True), avg_total
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # KPI CARD
 # ═════════════════════════════════════════════════════════════════════════════
 def _kpi(label, value, color="#1a3c5e", bg="#f0f6ff", border="#2d6a9f", tip=None):
@@ -910,7 +992,7 @@ def run_analysis(_, district, period, min_c, max_c):
     ], className='mb-3')
 
     info = dbc.Alert([
-        html.Strong(f"📊 {district} | {month_name} {year}"), html.Br(),
+        html.Strong(f"📊 {district} | {period_label}"), html.Br(),
         f"Pre-filter avg total: ", html.Strong(f"{avg_t:,.1f}"),
         f" | Filter: [{min_c}, {max_c or '∞'}]",
     ], color="info", className="mb-3")
@@ -951,7 +1033,7 @@ def run_analysis(_, district, period, min_c, max_c):
     tbody = html.Tbody(tbody_rows)
 
     table_sec = html.Div([
-        html.H4(f"📊 Office Performance — {month_name} {year} | {district}", className='mb-1'),
+        html.H4(f"📊 Office Performance — {period_label} | {district}", className='mb-1'),
         html.Small([
             "Sorted worst→best.  ",
             html.Span("ⓘ Bad-Month Streak", style={'cursor': 'help', 'textDecoration': 'underline dotted',
@@ -970,7 +1052,7 @@ def run_analysis(_, district, period, min_c, max_c):
         scored.sort_values('Composite_Score'),
         x='Office', y='OOT_Rate', color='Composite_Score',
         color_continuous_scale='RdYlGn', range_color=[0, 100],
-        title=f"OOT Rate by Office — {month_name} {year} | {district}",
+        title=f"OOT Rate by Office — {period_label} | {district}",
         labels={'OOT_Rate': '% Out of Time', 'Composite_Score': 'Score'},
         text='OOT_Rate')
     fig.add_hline(y=d_oot, line_dash='dash', line_color='#2980b9',
@@ -1115,9 +1197,18 @@ def toggle_detail(n_list, is_open_list, district, period):
             (_df['month_dt'].dt.year == y) & (_df['month_dt'].dt.month == m)
         ].groupby('Service', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
 
-    # rest of toggle_detail unchanged, but use y_ref/m_ref for _service_consistency:
+    # Determine index of the triggered office button in the ALL pattern list
+    all_ids = [item['id']['index'] for item in callback_context.inputs_list[0]]
+    idx = all_ids.index(office)
+
+    # Compute service-level stats for the panel
     svc_streaks = _service_consistency(district, office, y_ref, m_ref)
-    # ... (rest of panel building is identical)
+    snap['OOT_Rate'] = np.where(snap['Total'] > 0, (snap['OOT'] / snap['Total'] * 100).round(2), 0.0)
+    snap['StAvg'] = snap['Service'].map(lambda s: svc_avg.get(s, 0.0))
+    snap['vs'] = snap['OOT_Rate'] - snap['StAvg']
+    t_total = snap['OOT'].sum()
+    snap['Share'] = snap['OOT'].apply(lambda o: round(o / t_total * 100, 1) if t_total > 0 else 0)
+    snap = snap.sort_values('OOT_Rate', ascending=False).reset_index(drop=True)
 
     new_open = list(is_open_list)
     new_open[idx] = not is_open_list[idx]

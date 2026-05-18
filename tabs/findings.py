@@ -332,15 +332,140 @@ def _calculate_service_scores(y, m, min_c=0):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# FINANCIAL YEAR HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+def _fy_mask(series, fy_start):
+    """Boolean mask for FY: April fy_start to March fy_start+1."""
+    return (
+        ((series.dt.year == fy_start) & (series.dt.month >= 4)) |
+        ((series.dt.year == fy_start + 1) & (series.dt.month <= 3))
+    )
+
+
+def _score_offices_for_fy(district, fy_start, min_c=0, max_c=None):
+    """Score offices for a full financial year (findings version)."""
+    mask = _fy_mask(_df['month_dt'], fy_start) & (_df['District'] == district)
+    agg = _df[mask].groupby('Office', as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+    if agg.empty:
+        return pd.DataFrame()
+    district_avg_total = agg['Total'].mean()
+    agg = agg[agg['Total'] >= district_avg_total]
+    if min_c > 0:
+        agg = agg[agg['Total'] >= min_c]
+    if max_c and max_c > 0:
+        agg = agg[agg['Total'] <= max_c]
+    agg = agg.reset_index(drop=True)
+    if agg.empty:
+        return pd.DataFrame()
+    agg['OOT_Rate'] = np.where(agg['Total'] > 0, (agg['OOT'] / agg['Total'] * 100).round(2), 0.0)
+    offices = agg['Office'].tolist()
+
+    d_rows = _DM[_fy_mask(_DM['month_dt'], fy_start) & (_DM['District'] == district)]
+    d_oot = round(d_rows['OOT'].sum() / d_rows['Total'].sum() * 100, 2) if d_rows['Total'].sum() > 0 else 0.0
+    s_rows = _SM[_fy_mask(_SM['month_dt'], fy_start)]
+    s_oot = round(s_rows['OOT'].sum() / s_rows['Total'].sum() * 100, 2) if s_rows['Total'].sum() > 0 else 0.0
+
+    d_min, d_max = agg['OOT_Rate'].min(), agg['OOT_Rate'].max()
+    agg['F1'] = ((d_max - agg['OOT_Rate']) / (d_max - d_min) * 25).round(2) if d_max > d_min else 25.0
+    if s_oot > 0:
+        agg['F2'] = (12.5 + ((s_oot - agg['OOT_Rate']) / s_oot * 12.5)).clip(0, 25).round(2)
+    else:
+        agg['F2'] = np.where(agg['OOT_Rate'] <= 0, 25.0, 0.0)
+
+    fy_months = _OM[(_OM['District'] == district) & _fy_mask(_OM['month_dt'], fy_start)]['month_dt']
+    cutoff_ts = fy_months.max() if not fy_months.empty else pd.Timestamp(year=fy_start + 1, month=3, day=1)
+    streaks = _compute_streaks(district, offices, cutoff_ts)
+    agg['Streak'] = agg['Office'].map(streaks).fillna(0).astype(int)
+    agg['F3'] = agg['Streak'].apply(lambda s: 0.0 if s >= 9 else 8.33 if s >= 6 else 16.67 if s >= 3 else 25.0)
+
+    svc_agg = _df[mask & _df['Office'].isin(offices)].groupby(
+        ['Office', 'Service'], as_index=False).agg(OOT=('OOT', 'sum'))
+    top_svc_oot = svc_agg.groupby('Office')['OOT'].max().to_dict()
+    agg['Top_Svc_OOT'] = agg['Office'].map(top_svc_oot).fillna(0)
+    agg['Top_Svc_Share'] = np.where(agg['OOT'] > 0, agg['Top_Svc_OOT'] / agg['OOT'], 0)
+    agg['F4'] = np.where(agg['Top_Svc_Share'] >= 0.80, 25.0, 0.0)
+
+    agg['Composite_Score'] = (agg['F1'] + agg['F2'] + agg['F3'] + agg['F4']).round(2)
+    agg['District_Avg_OOT'] = d_oot
+    agg['State_Avg_OOT'] = s_oot
+    return agg
+
+
+def _calculate_district_scores_fy(fy_start, min_c=0, max_c=None):
+    """Calculate district composite scores for a full financial year."""
+    districts = sorted(_df['District'].dropna().unique())
+    results = []
+    for district in districts:
+        office_scores = _score_offices_for_fy(district, fy_start, min_c, max_c)
+        if office_scores.empty:
+            continue
+        avg_composite = office_scores['Composite_Score'].mean()
+        above_avg = office_scores[office_scores['Composite_Score'] > avg_composite]
+        results.append({
+            'District': district,
+            'Composite_Score': round(avg_composite, 2),
+            'Total_Offices': len(office_scores),
+            'Above_Avg_Offices': len(above_avg),
+            'office_data': office_scores.sort_values('Composite_Score').to_dict('records')
+        })
+    return pd.DataFrame(results)
+
+
+def _calculate_service_scores_fy(fy_start, min_c=0):
+    """Calculate service scores for a full financial year."""
+    mask = _fy_mask(_df['month_dt'], fy_start)
+    service_data = _df[mask].groupby('Service', as_index=False).agg(
+        Total=('Total', 'sum'), OOT=('OOT', 'sum'),
+        Num_Districts=('District', 'nunique'), Num_Offices=('Office', 'nunique')
+    )
+    if service_data.empty:
+        return pd.DataFrame()
+    service_data['OOT_Rate'] = np.where(
+        service_data['Total'] > 0,
+        (service_data['OOT'] / service_data['Total'] * 100).round(2), 0.0
+    )
+    avg_total = service_data['Total'].mean()
+    service_data = service_data[service_data['Total'] >= avg_total]
+    if min_c > 0:
+        service_data = service_data[service_data['Total'] >= min_c]
+    service_data = service_data[
+        (service_data['Num_Offices'] >= 3) & (service_data['Num_Districts'] >= 2)
+    ]
+    total_apps = _df[mask]['Total'].sum()
+    state_avg_oot = _df[mask]['OOT'].sum() / total_apps * 100 if total_apps > 0 else 0
+    service_data = service_data[service_data['OOT_Rate'] > state_avg_oot]
+    concentration = []
+    for service in service_data['Service']:
+        svc_offices = _df[mask & (_df['Service'] == service)].groupby('Office')['OOT'].sum()
+        max_share = svc_offices.max() / svc_offices.sum() * 100 if len(svc_offices) > 0 else 0
+        concentration.append(max_share)
+    service_data['Max_Office_Share'] = concentration
+    service_data['State_Avg_OOT'] = state_avg_oot
+    return service_data.sort_values(['OOT_Rate', 'Max_Office_Share'], ascending=[False, True])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # LAYOUT
 # ═════════════════════════════════════════════════════════════════════════════
-# 🆕 Generating Descending Period Options (Combines Year & Month)
 _periods = sorted(_df['month_dt'].dropna().unique(), reverse=True) if len(_df) else []
-period_options = [
+
+# Build combined period options: FY first, then monthly
+_seen_fy = set()
+_fy_opts = []
+for _p in _periods:
+    _d = pd.Timestamp(_p)
+    _fy_s = _d.year if _d.month >= 4 else _d.year - 1
+    if _fy_s not in _seen_fy:
+        _seen_fy.add(_fy_s)
+        _fy_opts.append({'label': f"📅 FY {_fy_s}-{str(_fy_s + 1)[2:]}", 'value': f'fy-{_fy_s}'})
+
+_monthly_opts = [
     {'label': f"{MONTH_NAMES[pd.Timestamp(p).month]} {pd.Timestamp(p).year}",
      'value': pd.Timestamp(p).strftime('%Y-%m-%d')}
     for p in _periods
 ]
+all_period_options = _fy_opts + _monthly_opts
+period_options = all_period_options  # backward compat alias
 
 layout = html.Div([
     html.Div([
@@ -371,8 +496,8 @@ layout = html.Div([
             html.Label("📅 Date Range", style={'fontWeight': 'bold'}),
             dcc.Dropdown(
                 id='findings-period',
-                options=period_options,
-                value=period_options[0]['value'] if period_options else None,
+                options=all_period_options,
+                value=all_period_options[0]['value'] if all_period_options else None,
                 clearable=False,
                 style={'borderRadius': '4px'}
             )
@@ -438,14 +563,25 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
         return html.Div("⚠️ Please select a period.",
                         style={'color': 'red', 'fontSize': '1.1rem', 'padding': '20px'})
 
-    # Extract Year and Month from the period selection
-    selected_dt = pd.to_datetime(period)
-    year, month = selected_dt.year, selected_dt.month
-    month_name = MONTH_NAMES.get(month, str(month))
+    # Parse period — supports both monthly (YYYY-MM-DD) and financial year (fy-YYYY)
+    if period.startswith('fy-'):
+        fy_start = int(period[3:])
+        period_label = f"FY {fy_start}-{str(fy_start + 1)[2:]}"
+        is_fy = True
+        year, month, month_name = fy_start, None, period_label
+    else:
+        selected_dt = pd.to_datetime(period)
+        year, month = selected_dt.year, selected_dt.month
+        month_name = MONTH_NAMES.get(month, str(month))
+        period_label = f"{month_name} {year}"
+        is_fy = False
 
     if analysis_type == 'district':
         # Calculate district scores
-        district_df = _calculate_district_scores(year, month, min_count or 0, None)
+        if is_fy:
+            district_df = _calculate_district_scores_fy(fy_start, min_count or 0, None)
+        else:
+            district_df = _calculate_district_scores(year, month, min_count or 0, None)
 
         if district_df.empty:
             return html.Div("No data available for the selected period.",
@@ -453,10 +589,10 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
 
         if mode == 'detail':
             display_df = district_df.sort_values('Composite_Score')
-            header_text = f"📋 All Districts Performance — {month_name} {year}"
+            header_text = f"📋 All Districts Performance — {period_label}"
         else:
             display_df = district_df.nsmallest(5, 'Composite_Score')
-            header_text = f"🔴 Worst 5 Districts — {month_name} {year}"
+            header_text = f"🔴 Worst 5 Districts — {period_label}"
 
         # Create output
         cards = []
@@ -529,8 +665,13 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
         ])
 
     elif analysis_type == 'office':
-        # 🆕 NEW Office-Level Analysis: Get 10 Worst Offices Statewide + Top 1 Worst Service
-        snap = _OM[(_OM['_y'] == year) & (_OM['_m'] == month)].copy()
+        if is_fy:
+            fy_om = _df[_fy_mask(_df['month_dt'], fy_start)].groupby(
+                ['District', 'Office'], as_index=False).agg(Total=('Total', 'sum'), OOT=('OOT', 'sum'))
+            fy_om['OOT_Rate'] = np.where(fy_om['Total'] > 0, (fy_om['OOT'] / fy_om['Total'] * 100).round(2), 0.0)
+            snap = fy_om.copy()
+        else:
+            snap = _OM[(_OM['_y'] == year) & (_OM['_m'] == month)].copy()
 
         if min_count and min_count > 0:
             snap = snap[snap['Total'] >= min_count]
@@ -539,8 +680,14 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
             return html.Div("No office data available for the selected criteria.",
                             style={'color': 'orange', 'fontSize': '1.1rem', 'padding': '20px'})
 
-        # Get worst 10 by highest OOT Rate
-        worst_10 = snap.sort_values(['OOT_Rate', 'Total'], ascending=[False, False]).head(10)
+        sorted_snap = snap.sort_values(['OOT_Rate', 'Total'], ascending=[False, False])
+        if mode == 'detail':
+            display_offices = sorted_snap
+            header_title = f"📋 All Offices Statewide — {period_label}"
+        else:
+            display_offices = sorted_snap.head(10)
+            header_title = f"🔴 Worst 10 Offices Statewide — {period_label}"
+        worst_10 = display_offices  # alias kept for card-building loop below
 
         cards = []
         for _, row in worst_10.iterrows():
@@ -550,7 +697,12 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
             total_apps = row['Total']
 
             # Find Top 1 Worst Service for this specific office
-            osm_snap = _OSM[(_OSM['Office'] == off) & (_OSM['_y'] == year) & (_OSM['_m'] == month) & (_OSM['OOT'] > 0)]
+            if is_fy:
+                osm_snap = _df[_fy_mask(_df['month_dt'], fy_start) & (_df['Office'] == off) & (_df['OOT'] > 0)].groupby(
+                    'Service', as_index=False).agg(OOT=('OOT', 'sum'), Total=('Total', 'sum'))
+                osm_snap['OOT_Rate'] = np.where(osm_snap['Total'] > 0, (osm_snap['OOT'] / osm_snap['Total'] * 100).round(2), 0.0)
+            else:
+                osm_snap = _OSM[(_OSM['Office'] == off) & (_OSM['_y'] == year) & (_OSM['_m'] == month) & (_OSM['OOT'] > 0)]
             if not osm_snap.empty:
                 worst_svc_row = osm_snap.loc[osm_snap['OOT'].idxmax()]  # Getting the service with most OOT applications
                 svc_text = f"{worst_svc_row['Service']} ({int(worst_svc_row['OOT'])} delayed | {worst_svc_row['OOT_Rate']:.1f}% OOT)"
@@ -595,22 +747,29 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
             cards.append(card)
 
         return html.Div([
-            html.H3(f"🔴 Worst 10 Offices Statewide — {month_name} {year}",
+            html.H3(header_title,
                     style={'color': '#1a3c5e', 'marginBottom': '20px', 'borderBottom': '3px solid #2d6a9f',
                            'paddingBottom': '10px'}),
             html.Div(cards),
         ])
 
     elif analysis_type == 'service':
-        # Calculate service scores
-        service_df = _calculate_service_scores(year, month, min_count or 0)
+        if is_fy:
+            service_df = _calculate_service_scores_fy(fy_start, min_count or 0)
+        else:
+            service_df = _calculate_service_scores(year, month, min_count or 0)
 
         if service_df.empty:
             return html.Div("No distributed high-OOT services found for the selected period.",
                             style={'color': 'orange', 'fontSize': '1.1rem', 'padding': '20px'})
 
-        # Get top 5 services
-        top_5_services = service_df.head(5)
+        if mode == 'detail':
+            display_services = service_df
+            svc_header = f"📋 All Distributed High-OOT Services — {period_label}"
+        else:
+            display_services = service_df.head(5)
+            svc_header = f"🔴 Top 5 Distributed High-OOT Services — {period_label}"
+        top_5_services = display_services  # alias kept for card loop
 
         # Create output cards
         cards = []
@@ -659,7 +818,7 @@ def generate_findings(n_clicks, analysis_type, period, min_count, mode):
             cards.append(card)
 
         return html.Div([
-            html.H3(f"🔴 Top 5 Distributed High-OOT Services — {month_name} {year}",
+            html.H3(svc_header,
                     style={'color': '#1a3c5e', 'marginBottom': '20px', 'borderBottom': '3px solid #2d6a9f',
                            'paddingBottom': '10px'}),
             html.P([
@@ -795,9 +954,15 @@ def open_trend_modal(n_clicks, period):
     district = button_id['district']
     office = button_id['office']
 
-    # 🆕 Extract Year and Month directly from the period variable
-    selected_dt = pd.to_datetime(period)
-    year, month = selected_dt.year, selected_dt.month
+    # Extract Year and Month from period (supports FY and monthly)
+    if period.startswith('fy-'):
+        fy_start = int(period[3:])
+        fy_months = _OM[_fy_mask(_OM['month_dt'], fy_start)]['month_dt']
+        ref_dt = fy_months.max() if not fy_months.empty else pd.Timestamp(year=fy_start + 1, month=3, day=1)
+        year, month = ref_dt.year, ref_dt.month
+    else:
+        selected_dt = pd.to_datetime(period)
+        year, month = selected_dt.year, selected_dt.month
 
     end_date = pd.Timestamp(year=year, month=month, day=1)
     start_date = end_date - pd.DateOffset(months=5)
