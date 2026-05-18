@@ -15,3 +15,5 @@ data sql.sql
 data-as-per-given-nic/
 tmp-111111/
 tmp-22222/
+NIC_DATA_ARCH/
+data-pre.py
