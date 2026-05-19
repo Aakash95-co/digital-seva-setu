@@ -183,6 +183,9 @@ layout = html.Div([
     dcc.Store(id='rt-tracked-store', storage_type='local', data=[]),
     dcc.Store(id='rt-uploads-store', storage_type='local', data=[]),
 
+    # ── Hidden download component ────────────────────────────────────────────
+    dcc.Download(id='rt-file-download'),
+
 ], style={'padding': '20px'})
 
 
@@ -265,13 +268,21 @@ def render_uploads(uploads):
 
     rows = []
     for i, e in enumerate(uploads, 1):
-        icon = _ICON_MAP.get(e.get('ext', ''), '📎')
+        icon     = _ICON_MAP.get(e.get('ext', ''), '📎')
+        saved_as = e.get('saved_as', '')
+        dl_btn = dbc.Button(
+            "⬇️ Download", size='sm', color='primary', outline=True,
+            id={'type': 'rt-dl-btn', 'index': saved_as},
+            style={'padding': '2px 10px', 'fontSize': '0.82rem'},
+            disabled=not bool(saved_as),
+        )
         rows.append(html.Tr([
             html.Td(str(i), style={'color': '#888', 'width': '36px', 'textAlign': 'center'}),
             html.Td([html.Span(icon + " "), html.Strong(e.get('filename', '—'))]),
             html.Td(e.get('ext', '—'),      style={'color': '#2d6a9f', 'textAlign': 'center'}),
             html.Td(e.get('size', '—'),     style={'color': '#555', 'textAlign': 'right'}),
             html.Td(e.get('uploaded', '—'), style={'color': '#555', 'fontSize': '0.85rem'}),
+            html.Td(dl_btn,                 style={'textAlign': 'center'}),
         ]))
 
     return dbc.Table(
@@ -282,12 +293,49 @@ def render_uploads(uploads):
                 html.Th("Type",        style={'textAlign': 'center'}),
                 html.Th("Size",        style={'textAlign': 'right'}),
                 html.Th("Uploaded On"),
+                html.Th("Download",    style={'textAlign': 'center'}),
             ]), style={'background': '#eef4fb'}),
             html.Tbody(rows),
         ],
         bordered=True, hover=True, responsive=True, size='sm',
         style={'marginBottom': '0', 'fontSize': '0.9rem'},
     )
+
+
+# ── 6. Download an uploaded file from disk ───────────────────────────────────
+@app.callback(
+    Output('rt-file-download', 'data'),
+    Input({'type': 'rt-dl-btn', 'index': ALL}, 'n_clicks'),
+    State('rt-uploads-store', 'data'),
+    prevent_initial_call=True,
+)
+def download_uploaded_file(n_clicks_list, uploads):
+    ctx = callback_context
+    if not ctx.triggered or not any(n for n in (n_clicks_list or []) if n):
+        return dash.no_update
+
+    triggered_prop = ctx.triggered[0]['prop_id']
+    try:
+        id_dict  = json.loads(triggered_prop.rsplit('.', 1)[0])
+        saved_as = id_dict['index']
+    except Exception:
+        return dash.no_update
+
+    # Resolve original filename from store
+    orig_name = saved_as
+    for e in (uploads or []):
+        if e.get('saved_as') == saved_as:
+            orig_name = e.get('filename', saved_as)
+            break
+
+    file_path = os.path.join(_UPLOAD_DIR, saved_as)
+    if not os.path.exists(file_path):
+        return dash.no_update
+
+    with open(file_path, 'rb') as fh:
+        content = fh.read()
+
+    return dcc.send_bytes(content, filename=orig_name)
 
 
 # ── 3. Add item to tracking store ────────────────────────────────────────────
